@@ -86,7 +86,7 @@ impl Default for ReorderFault {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     pub log_all_operations: bool,
     pub is_default_config: bool,

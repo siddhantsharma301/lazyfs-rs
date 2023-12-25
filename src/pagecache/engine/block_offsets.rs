@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct BlockOffsets {
     block_offset_mapping: HashMap<i32, (i32, i32)>,
     block_readable_to: HashMap<i32, i32>,
@@ -41,7 +41,7 @@ impl BlockOffsets {
         self.block_readable_to.reserve(capacity);
     }
 
-    fn get_readable_to(&self, block_id: i32) -> i32 {
+    pub fn get_readable_to(&self, block_id: i32) -> i32 {
         *self.block_readable_to.get(&block_id).unwrap_or(&0)
     }
 
