@@ -1,6 +1,6 @@
 use crate::pagecache::config::Config;
 use crate::pagecache::engine::page::Page;
-use crate::pagecache::engine::AllocateOperationType;
+use crate::pagecache::engine::{AllocateOperationType, PageCacheEngine};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
@@ -233,8 +233,10 @@ impl CustomCacheEngine {
                 .push(page_id);
         }
     }
+}
 
-    pub fn allocate_blocks(
+impl PageCacheEngine for CustomCacheEngine {
+    fn allocate_blocks(
         &mut self,
         content_owner_id: String,
         block_data_mapping: HashMap<i32, (i32, Vec<u8>, usize, i32)>,
@@ -288,7 +290,7 @@ impl CustomCacheEngine {
         Ok(res_block_allocated_pages)
     }
 
-    pub fn get_blocks(
+    fn get_blocks(
         &mut self,
         content_owner_id: String,
         block_pages: HashMap<i32, (i32, Vec<u8>, i32)>,
@@ -315,20 +317,37 @@ impl CustomCacheEngine {
         Ok(res_block_data)
     }
 
-    pub fn is_block_cached(&self, content_owner_id: String, page_id: i32, block_id: i32) -> bool {
+    fn is_block_cached(&self, content_owner_id: String, page_id: i32, block_id: i32) -> bool {
         if let Some(page) = self.get_page_ptr(page_id) {
             return page.is_page_owner(&content_owner_id) && page.contains_block(block_id);
         }
         false
     }
 
-    pub fn get_engine_usage(&self) -> f64 {
+    fn make_block_readable_to_offset(
+        &mut self,
+        cid: String,
+        page_id: i32,
+        block_id: i32,
+        offset: i32,
+    ) {
+        let _lock = self.data.write().unwrap();
+        let mut page = match self.get_page_ptr(page_id) {
+            Some(p) => p,
+            None => return,
+        };
+        if page.is_page_owner(&cid) {
+            page.make_block_readable_to(block_id, offset);
+        }
+    }
+
+    fn get_engine_usage(&self) -> f64 {
         let lock = self.data.read().unwrap();
         let used_pages = self.config.cache_nr_pages - lock.free_pages.len();
         (used_pages as f64 / self.config.cache_nr_pages as f64) * 100.0
     }
 
-    pub fn remove_cached_blocks(&mut self, owner: String) -> bool {
+    fn remove_cached_blocks(&mut self, owner: String) -> bool {
         let mut lock = self.data.write().unwrap();
 
         lock.owner_free_pages_mapping.remove(&owner);
@@ -359,7 +378,7 @@ impl CustomCacheEngine {
         true
     }
 
-    pub fn sync_pages(&mut self, owner: String, size: u64, orig_path: String) -> Result<()> {
+    fn sync_pages(&mut self, owner: String, size: u64, orig_path: String) -> Result<()> {
         let mut lock = self.data.write().unwrap();
 
         let mut fd = OpenOptions::new().write(true).open(orig_path)?;
@@ -447,24 +466,7 @@ impl CustomCacheEngine {
         Ok(())
     }
 
-    pub fn make_block_readable_to_offset(
-        &mut self,
-        cid: String,
-        page_id: i32,
-        block_id: i32,
-        offset: i32,
-    ) {
-        let _lock = self.data.write().unwrap();
-        let mut page = match self.get_page_ptr(page_id) {
-            Some(p) => p,
-            None => return,
-        };
-        if page.is_page_owner(&cid) {
-            page.make_block_readable_to(block_id, offset);
-        }
-    }
-
-    pub fn rename_owner_pages(&mut self, old_owner: String, new_owner: String) -> bool {
+    fn rename_owner_pages(&mut self, old_owner: String, new_owner: String) -> bool {
         let mut lock = self.data.write().unwrap();
 
         // Check if the old owner exists in the mapping
@@ -495,7 +497,7 @@ impl CustomCacheEngine {
         true
     }
 
-    pub fn truncate_cached_blocks(
+    fn truncate_cached_blocks(
         &mut self,
         content_owner_id: String,
         blocks_to_remove: HashMap<i32, i32>,
@@ -546,7 +548,7 @@ impl CustomCacheEngine {
         true
     }
 
-    pub fn get_dirty_blocks_info(&self, owner: String) -> Vec<(i32, (i32, i32), i32)> {
+    fn get_dirty_blocks_info(&self, owner: String) -> Vec<(i32, (i32, i32), i32)> {
         let lock = self.data.read().unwrap();
         let mut res = Vec::new();
         if let Some(ordered_pages) = lock.owner_ordered_pages_mapping.get(&owner) {
