@@ -1,4 +1,5 @@
 pub mod pagecache;
+pub mod lazyfs;
 
 pub fn add(left: usize, right: usize) -> usize {
     left + right
