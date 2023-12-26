@@ -365,7 +365,7 @@ impl CustomCacheEngine {
         let mut fd = OpenOptions::new().write(true).open(orig_path)?;
 
         if let Some(iterate_blocks) = lock.owner_ordered_pages_mapping.get_mut(&owner) {
-            let mut wrote_bytes = 0;
+            // let mut wrote_bytes = 0;
             let mut page_streak = 0;
 
             let mut new_iterate_blocks: HashMap<i32, (i32, Page, (i32, i32), bool)> =
@@ -430,7 +430,8 @@ impl CustomCacheEngine {
                     }
 
                     fd.seek(SeekFrom::Start(page_streak_last_offset as u64))?;
-                    wrote_bytes += fd.write(&buffer)?;
+                    fd.write(&buffer)?;
+                    // wrote_bytes += fd.write(&buffer)?;
 
                     page_streak = 0;
                     page_chunk.clear();
