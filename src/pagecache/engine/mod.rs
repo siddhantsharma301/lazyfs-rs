@@ -5,7 +5,7 @@ pub mod block_offsets;
 pub mod page;
 
 #[derive(Debug, PartialEq)]
-enum AllocateOperationType {
+pub enum AllocateOperationType {
     OpRead,       // Specifies that the operation comes from a read operation
     OpWrite,      // Specifies that the operation comes from a write operation
     OpPassthrough, // Specifies the otherwise case (equal to OpRead for now)
