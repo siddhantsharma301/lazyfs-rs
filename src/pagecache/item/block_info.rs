@@ -1,3 +1,4 @@
+#[derive(Debug)]
 pub struct BlockInfo {
     readable_offset: (i32, i32),
     pub page_index_number: i32,

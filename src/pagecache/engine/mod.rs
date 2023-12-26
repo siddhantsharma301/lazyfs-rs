@@ -12,7 +12,7 @@ pub enum AllocateOperationType {
     OpPassthrough, // Specifies the otherwise case (equal to OpRead for now)
 }
 
-trait PageCacheEngine {
+pub trait PageCacheEngine {
     fn allocate_blocks(
         &mut self,
         content_owner_id: String,
