@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, RwLock};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::pagecache::config::Config;
 use crate::pagecache::engine::{AllocateOperationType, PageCacheEngine};
@@ -84,19 +84,28 @@ impl Cache {
         new_meta: Metadata,
         values_to_update: Vec<String>,
     ) -> Result<bool> {
-        self.contents
+        let guard = self
+            .contents
             .read()
-            .map_err(|e| anyhow!("Failed to read item: {:?}", e))
-            .and_then(|lock| {
-                lock.get(&cid).map_or(Ok(false), |item| {
-                    item.lock()
-                        .map_err(|e| anyhow!("Failed to lock item: {:?}", e))
-                        .map(|mut item_lock| {
-                            item_lock.update_metadata(new_meta, values_to_update);
-                            true
-                        })
+            .map_err(|e| anyhow!("Failed to read item: {:?}", e))?;
+        self.update_content_metadata_locked(&guard, cid, new_meta, values_to_update)
+    }
+
+    fn update_content_metadata_locked(
+        &self,
+        contents: &RwLockReadGuard<HashMap<String, Mutex<Item>>>,
+        cid: String,
+        meta: Metadata,
+        values_to_update: Vec<String>,
+    ) -> Result<bool> {
+        contents.get(&cid).map_or(Ok(false), |item| {
+            item.lock()
+                .map_err(|e| anyhow!("Failed to lock item: {:?}", e))
+                .map(|mut item_lock| {
+                    item_lock.update_metadata(meta, values_to_update);
+                    true
                 })
-            })
+        })
     }
 
     pub fn get_content_metadata(&self, cid: String) -> Result<Option<Metadata>> {
@@ -269,7 +278,7 @@ impl Cache {
         todo!()
     }
 
-    pub fn clear_cache(&mut self) -> Result<()>{
+    pub fn clear_cache(&mut self) -> Result<()> {
         let lock = self.file_inode_mapping.read().unwrap();
         let items: Vec<_> = lock.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         // todo: unsure if can drop lock here
@@ -286,7 +295,7 @@ impl Cache {
             drop(item_lock);
             lock.remove(&item);
         }
-        
+
         Ok(())
     }
 
@@ -322,14 +331,19 @@ impl Cache {
             }
             Err(e) => return Err(anyhow!("Failed to read: {:?}", e)),
         }
-        drop(lock);
 
         if increase {
             let meta = self.get_content_metadata(inode.clone())?;
             match meta {
                 Some(mut meta) => {
                     meta.nlinks += 1;
-                    self.update_content_metadata(inode, meta, vec!["nlinks".to_string()])?;
+                    let contents_lock = self.contents.read().unwrap();
+                    self.update_content_metadata_locked(
+                        &contents_lock,
+                        inode,
+                        meta,
+                        vec!["nlinks".to_string()],
+                    )?;
                 }
                 None => return Err(anyhow!("Unable to fetch metadata of inserted inode!")),
             }
