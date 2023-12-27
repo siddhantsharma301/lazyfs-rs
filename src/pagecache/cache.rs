@@ -1,7 +1,7 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use crate::pagecache::config::Config;
 use crate::pagecache::engine::{AllocateOperationType, PageCacheEngine};
@@ -9,49 +9,31 @@ use crate::pagecache::item::metadata::Metadata;
 use crate::pagecache::item::Item;
 
 pub struct Cache {
-    /// A cache configuration object.
-    /// Assuming `CacheConfig` is a Rust equivalent of `cache::config::Config`.
+    /// Cache configuration struct
     config: Box<Config>,
-    inner: RwLock<CacheInner>
-}
-
-struct CacheInner {
-    /// Maps filenames to the corresponding inodes.
-    /// If a hard link is created for a file, a new entry
-    /// on this map is also created, for the same inode.
-    file_inode_mapping: HashMap<String, String>,
-
-    /// Maps content ids (e.g., file names) to the contents.
-    contents: HashMap<String, Box<Item>>,
-
-    /// Maps each content to a lock mutex.
-    item_locks: HashMap<String, RwLock<Item>>,
-
-    /// Cache engine abstraction object.
-    /// Assuming `PageCacheEngine` is already defined in Rust.
+    /// Maps filenames to the corresponding inodes. If a hard link is created for a file, a new
+    /// entry on this map is also created, for the same inode.
+    file_inode_mapping: RwLock<HashMap<PathBuf, String>>,
+    /// Maps content ids (e.g. file names) to the contents
+    contents: RwLock<HashMap<String, Mutex<Item>>>,
+    /// Cache engine abstraction struct
     engine: Box<dyn PageCacheEngine>,
-}
-
-impl CacheInner {
-    fn new(engine: impl PageCacheEngine + 'static) -> Self {
-        CacheInner {
-            file_inode_mapping: HashMap::with_capacity(1000),
-            contents: HashMap::new(),
-            item_locks: HashMap::with_capacity(1000),
-            engine: Box::new(engine)
-        }
-    }
 }
 
 impl Cache {
     pub fn new(config: Config, engine: impl PageCacheEngine + 'static) -> Self {
         Cache {
             config: Box::new(config),
-            inner: RwLock::new(CacheInner::new(engine))
+            file_inode_mapping: RwLock::new(HashMap::with_capacity(1000)),
+            contents: RwLock::new(HashMap::with_capacity(1000)),
+            engine: Box::new(engine),
         }
     }
 
-    fn get_content_ptr(&self, cid: String) -> Item {
+    fn get_content_ptr(&self, cid: String) -> Option<&Mutex<Item>> {
+        // let lock = self.contents.read().unwrap();
+        // let mutex = lock.get(&cid);
+        // mutex
         todo!()
     }
 
@@ -59,16 +41,27 @@ impl Cache {
         todo!()
     }
 
-    pub fn create_item(&mut self, cid: String) -> Item {
-        todo!()
+    pub fn create_item(&mut self, cid: String) -> Result<()> {
+        let item = Mutex::new(Item::default());
+        let lock = self.contents.write();
+        match lock {
+            Ok(mut l) => {
+                l.insert(cid.clone(), item);
+                Ok(())
+            }
+            Err(e) => Err(anyhow!("Failed to create item: {:?}", e)),
+        }
     }
 
     pub fn delete_item(&mut self, cid: String) -> Result<()> {
         todo!()
     }
 
-    pub fn has_content_cached(&self, cid: String) -> bool {
-        todo!()
+    pub fn has_content_cached(&self, cid: String) -> Result<bool> {
+        match self.contents.read() {
+            Ok(lock) => Ok(lock.contains_key(&cid)),
+            Err(e) => Err(anyhow!("Failed to read item: {:?}", e)),
+        }
     }
 
     pub fn update_content_metadata(
@@ -76,12 +69,35 @@ impl Cache {
         cid: String,
         new_meta: Metadata,
         values_to_update: Vec<String>,
-    ) -> Result<()> {
-        todo!()
+    ) -> Result<bool> {
+        self.contents
+            .read()
+            .map_err(|e| anyhow!("Failed to read item: {:?}", e))
+            .and_then(|lock| {
+                lock.get(&cid).map_or(Ok(false), |item| {
+                    item.lock()
+                        .map_err(|e| anyhow!("Failed to lock item: {:?}", e))
+                        .map(|mut item_lock| {
+                            item_lock.update_metadata(new_meta, values_to_update);
+                            true
+                        })
+                })
+            })
     }
 
-    pub fn get_content_metadata(&self, cid: String) -> Metadata {
-        todo!()
+    pub fn get_content_metadata(&self, cid: String) -> Result<Option<Metadata>> {
+        self.contents
+            .read()
+            .map_err(|e| anyhow!("Failed to read: {:?}", e))
+            .and_then(|lock| {
+                lock.get(&cid)
+                    .map(|item| item.lock())
+                    .map_or(Ok(None), |result| {
+                        result
+                            .map(|item| Some(item.metadata.clone()))
+                            .map_err(|e| anyhow!("Failed to read: {:?}", e))
+                    })
+            })
     }
 
     pub fn put_data_blocks(
@@ -145,12 +161,40 @@ impl Cache {
         todo!()
     }
 
-    pub fn get_original_inode(&self, path: PathBuf) -> &str {
-        todo!()
+    pub fn get_original_inode(&self, path: PathBuf) -> Result<Option<String>> {
+        self.file_inode_mapping
+            .read()
+            .map_err(|e| anyhow!("Failed to read: {:?}", e))
+            .and_then(|lock| Ok(lock.get(&path).cloned()))
     }
 
-    pub fn insert_inode_mapping(&mut self, path: PathBuf, inode: String, increase: bool) {
-        todo!()
+    pub fn insert_inode_mapping(
+        &mut self,
+        path: PathBuf,
+        inode: String,
+        increase: bool,
+    ) -> Result<()> {
+        let mut lock = self.file_inode_mapping.write();
+        match lock {
+            Ok(ref mut lock) => {
+                lock.insert(path, inode.clone());
+            }
+            Err(e) => return Err(anyhow!("Failed to read: {:?}", e)),
+        }
+        drop(lock);
+
+        if increase {
+            let meta = self.get_content_metadata(inode.clone())?;
+            match meta {
+                Some(mut meta) => {
+                    meta.nlinks += 1;
+                    self.update_content_metadata(inode, meta, vec!["nlinks".to_string()])?;
+                }
+                None => return Err(anyhow!("Unable to fetch metadata of inserted inode!")),
+            }
+        }
+
+        Ok(())
     }
 
     pub fn find_files_mapped_to_inode(&self, inode: String) -> Vec<String> {
