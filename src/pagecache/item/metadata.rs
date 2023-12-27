@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Metadata {
     pub nlinks: u32,
     pub size: i32,

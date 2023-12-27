@@ -2,7 +2,7 @@ use crate::pagecache::item::block_info::BlockInfo;
 use crate::pagecache::item::metadata::Metadata;
 use std::collections::HashMap;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Item {
     pub data: ItemData,
     pub metadata: Metadata,
@@ -36,7 +36,7 @@ impl Default for Item {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ItemData {
     blocks: HashMap<i32, Box<BlockInfo>>,
 }

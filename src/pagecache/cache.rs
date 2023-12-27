@@ -10,25 +10,20 @@ use crate::pagecache::item::Item;
 
 pub struct Cache {
     /// A cache configuration object.
-    /// Assuming `CacheConfig` is a Rust equivalent of `cache::config::Config`.
     config: Box<Config>,
-    inner: RwLock<CacheInner>
+    inner: RwLock<CacheInner>,
 }
 
 struct CacheInner {
     /// Maps filenames to the corresponding inodes.
     /// If a hard link is created for a file, a new entry
     /// on this map is also created, for the same inode.
-    file_inode_mapping: HashMap<String, String>,
+    file_inode_mapping: HashMap<PathBuf, String>,
 
     /// Maps content ids (e.g., file names) to the contents.
-    contents: HashMap<String, Box<Item>>,
-
-    /// Maps each content to a lock mutex.
-    item_locks: HashMap<String, RwLock<Item>>,
+    contents: HashMap<String, RwLock<Item>>,
 
     /// Cache engine abstraction object.
-    /// Assuming `PageCacheEngine` is already defined in Rust.
     engine: Box<dyn PageCacheEngine>,
 }
 
@@ -36,9 +31,8 @@ impl CacheInner {
     fn new(engine: impl PageCacheEngine + 'static) -> Self {
         CacheInner {
             file_inode_mapping: HashMap::with_capacity(1000),
-            contents: HashMap::new(),
-            item_locks: HashMap::with_capacity(1000),
-            engine: Box::new(engine)
+            contents: HashMap::with_capacity(1000),
+            engine: Box::new(engine),
         }
     }
 }
@@ -47,20 +41,24 @@ impl Cache {
     pub fn new(config: Config, engine: impl PageCacheEngine + 'static) -> Self {
         Cache {
             config: Box::new(config),
-            inner: RwLock::new(CacheInner::new(engine))
+            inner: RwLock::new(CacheInner::new(engine)),
         }
     }
 
-    fn get_content_ptr(&self, cid: String) -> Item {
-        todo!()
+    fn get_content_ptr(&self, cid: String) -> Option<&RwLock<Item>> {
+        let lock = self.inner.read().unwrap();
+        lock.contents.get(&cid)
     }
 
     fn get_readable_offsets(&self, cid: String, item: Item, blk: i32) -> (i32, i32) {
         todo!()
     }
 
-    pub fn create_item(&mut self, cid: String) -> Item {
-        todo!()
+    pub fn create_item(&mut self, cid: String) -> &RwLock<Item> {
+        let item = RwLock::new(Item::default());
+        let mut lock = self.inner.write().unwrap();
+        lock.contents.insert(cid.clone(), item);
+        lock.contents.get(&cid).unwrap()
     }
 
     pub fn delete_item(&mut self, cid: String) -> Result<()> {
@@ -68,7 +66,7 @@ impl Cache {
     }
 
     pub fn has_content_cached(&self, cid: String) -> bool {
-        todo!()
+        self.inner.read().unwrap().contents.contains_key(&cid)
     }
 
     pub fn update_content_metadata(
@@ -76,12 +74,26 @@ impl Cache {
         cid: String,
         new_meta: Metadata,
         values_to_update: Vec<String>,
-    ) -> Result<()> {
-        todo!()
+    ) -> bool {
+        let lock = self.inner.read().unwrap();
+        if let Some(item) = lock.contents.get(&cid) {
+            let mut item_lock = item.write().unwrap();
+            item_lock.update_metadata(new_meta, values_to_update);
+            true
+        } else {
+            false
+        }
     }
 
-    pub fn get_content_metadata(&self, cid: String) -> Metadata {
-        todo!()
+    pub fn get_content_metadata(&self, cid: String) -> Option<Metadata> {
+        let item = self.get_content_ptr(cid);
+        match item {
+            Some(item) => {
+                let lock = item.read().unwrap();
+                Some(lock.metadata.clone())
+            }
+            None => None,
+        }
     }
 
     pub fn put_data_blocks(
@@ -145,12 +157,30 @@ impl Cache {
         todo!()
     }
 
-    pub fn get_original_inode(&self, path: PathBuf) -> &str {
-        todo!()
+    pub fn get_original_inode(&self, path: PathBuf) -> Option<String> {
+        let lock = self.inner.read().unwrap();
+        lock.file_inode_mapping.get(&path).cloned()
     }
 
     pub fn insert_inode_mapping(&mut self, path: PathBuf, inode: String, increase: bool) {
-        todo!()
+        let mut meta = None;
+        if increase {
+            let _lock = self.inner.read().unwrap();
+            if let Some(mut m) = self.get_content_metadata(inode.clone()) {
+                m.nlinks += 1;
+                meta = Some(m);
+            }
+        }
+
+        match meta {
+            Some(meta) => {
+                let mut lock = self.inner.write().unwrap();
+                lock.file_inode_mapping.insert(path, inode.clone());
+                drop(lock);
+                self.update_content_metadata(inode, meta.clone(), vec!["nlinks".to_string()]);
+            }
+            None => {}
+        }
     }
 
     pub fn find_files_mapped_to_inode(&self, inode: String) -> Vec<String> {
