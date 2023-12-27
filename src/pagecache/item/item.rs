@@ -31,7 +31,7 @@ impl Default for Item {
         Self {
             data: ItemData::default(),
             metadata: Metadata::default(),
-            is_synced: true
+            is_synced: true,
         }
     }
 }
@@ -46,6 +46,13 @@ impl ItemData {
         match self.blocks.get(&blk_id) {
             Some(block_info) => block_info.page_index_number,
             None => -1,
+        }
+    }
+
+    pub fn get_readable_offsets(&self, block_id: i32) -> Option<(i32, i32)> {
+        match self.blocks.get(&block_id) {
+            Some(block_info) => Some(block_info.readable_offset),
+            None => None,
         }
     }
 
@@ -77,6 +84,26 @@ impl ItemData {
         }
 
         res
+    }
+
+    pub fn set_block_page_id(
+        &mut self,
+        block_id: i32,
+        allocated_page: i32,
+        readable_from: i32,
+        readable_to: i32,
+    ) -> i32 {
+        let block = self
+            .blocks
+            .entry(block_id)
+            .or_insert_with(|| Box::new(BlockInfo::default()));
+
+        block.page_index_number = allocated_page;
+        block.make_readable_to(readable_to)
+    }
+
+    pub fn remove_block(&mut self, block_id: i32) {
+        self.blocks.remove(&block_id);
     }
 }
 

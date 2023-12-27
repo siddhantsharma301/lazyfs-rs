@@ -239,7 +239,7 @@ impl PageCacheEngine for CustomCacheEngine {
     fn allocate_blocks(
         &mut self,
         content_owner_id: String,
-        block_data_mapping: HashMap<i32, (i32, Vec<u8>, usize, i32)>,
+        block_data_mapping: HashMap<i32, (i32, &[u8], usize, i32)>,
         operation_type: AllocateOperationType,
     ) -> Result<HashMap<i32, i32>> {
         let mut res_block_allocated_pages = HashMap::new();

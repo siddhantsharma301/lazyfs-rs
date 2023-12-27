@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::pagecache::config::Config;
 use crate::pagecache::engine::{AllocateOperationType, PageCacheEngine};
@@ -15,7 +15,7 @@ pub struct Cache {
     /// entry on this map is also created, for the same inode.
     file_inode_mapping: RwLock<HashMap<PathBuf, String>>,
     /// Maps content ids (e.g. file names) to the contents
-    contents: RwLock<HashMap<String, Mutex<Item>>>,
+    contents: Arc<RwLock<HashMap<String, Mutex<Item>>>>,
     /// Cache engine abstraction struct
     engine: Box<dyn PageCacheEngine>,
 }
@@ -25,36 +25,45 @@ impl Cache {
         Cache {
             config: Box::new(config),
             file_inode_mapping: RwLock::new(HashMap::with_capacity(1000)),
-            contents: RwLock::new(HashMap::with_capacity(1000)),
+            contents: Arc::new(RwLock::new(HashMap::with_capacity(1000))),
             engine: Box::new(engine),
         }
     }
 
-    fn get_content_ptr(&self, cid: String) -> Option<&Mutex<Item>> {
-        // let lock = self.contents.read().unwrap();
-        // let mutex = lock.get(&cid);
-        // mutex
-        todo!()
-    }
+    // fn get_content_ptr(&self, cid: String) -> Option<&Mutex<Item>> {
+    //     // let lock = self.contents.read().unwrap();
+    //     // let mutex = lock.get(&cid);
+    //     // mutex
+    //     todo!()
+    // }
 
-    fn get_readable_offsets(&self, cid: String, item: Item, blk: i32) -> (i32, i32) {
-        todo!()
+    fn get_readable_offsets(&self, cid: String, item: Item, block_id: i32) -> Option<(i32, i32)> {
+        let data = item.data;
+        let page_id = data.get_page_id(block_id);
+        if self.engine.is_block_cached(cid, page_id, block_id) {
+            return data.get_readable_offsets(block_id);
+        }
+        None
     }
 
     pub fn create_item(&mut self, cid: String) -> Result<()> {
-        let item = Mutex::new(Item::default());
-        let lock = self.contents.write();
-        match lock {
-            Ok(mut l) => {
-                l.insert(cid.clone(), item);
-                Ok(())
-            }
-            Err(e) => Err(anyhow!("Failed to create item: {:?}", e)),
-        }
+        self.contents
+            .write()
+            .map(|mut l| {
+                l.insert(cid.clone(), Mutex::new(Item::default()));
+                ()
+            })
+            .map_err(|e| anyhow!("Failed to create item: {:?}", e))
     }
 
     pub fn delete_item(&mut self, cid: String) -> Result<()> {
-        todo!()
+        self.contents
+            .write()
+            .map(|mut l| {
+                l.remove(&cid);
+                ()
+            })
+            .map_err(|e| anyhow!("Failed to create item: {:?}", e))
     }
 
     pub fn has_content_cached(&self, cid: String) -> Result<bool> {
@@ -101,11 +110,49 @@ impl Cache {
     }
 
     pub fn put_data_blocks(
+        &mut self,
         cid: String,
-        blocks: HashMap<i32, (Vec<u8>, usize, i32, i32)>,
+        blocks: HashMap<i32, (&[u8], usize, i32, i32)>,
         operation_type: AllocateOperationType,
-    ) -> HashMap<i32, bool> {
-        todo!()
+    ) -> Result<HashMap<i32, bool>> {
+        let mut put_mapping = HashMap::new();
+        let is_new = self
+            .contents
+            .write()
+            .map(|l| l.contains_key(&cid.clone()))
+            .map_err(|e| anyhow!("Failed to create item: {:?}", e))?;
+        if !is_new {
+            self.create_item(cid.clone())?;
+        }
+
+        let lock = self.contents.read().unwrap();
+        let mut item = lock.get(&cid.clone()).unwrap().lock().unwrap();
+        for (block_id, (block_data, size, start, _)) in blocks.clone() {
+            let page_id = if is_new { -1 } else { item.data.get_page_id(block_id) };
+            put_mapping.insert(block_id, (page_id, block_data, size, start));
+        }
+
+        let allocations = self.engine.allocate_blocks(cid.clone(), put_mapping, operation_type)?;
+        let mut put_res = HashMap::new();
+        let mut allocated_at_least_one_page = false;
+        for (block_id, page_id) in allocations {
+            let offsets = blocks[&block_id];
+            let (_, _, _, readable_to) = offsets;
+            if page_id >= 0 {
+                allocated_at_least_one_page = true;
+                let max_offset = item.data.set_block_page_id(block_id, page_id, 0, readable_to);
+                self.engine.make_block_readable_to_offset(cid.clone(), page_id, block_id, max_offset);
+            } else {
+                item.data.remove_block(block_id);
+            }
+            put_res.insert(block_id, page_id >= 0);
+        }
+
+        if allocated_at_least_one_page {
+            item.is_synced = false;
+        }
+        
+        Ok(put_res)
     }
 
     pub fn get_data_blocks(
@@ -115,12 +162,20 @@ impl Cache {
         todo!()
     }
 
-    pub fn is_block_cached(&self, cid: String, blk_id: i32) -> bool {
-        todo!()
+    pub fn is_block_cached(&self, cid: String, block_id: i32) -> Result<bool> {
+        if self.has_content_cached(cid.clone())? {
+            let contents = self.contents.read().unwrap();
+            if let Some(item) = contents.get(&cid) {
+                let item_lock = item.lock().unwrap();
+                let page_id = item_lock.data.get_page_id(block_id);
+                return Ok(self.engine.is_block_cached(cid, page_id, block_id));
+            }
+        }
+        Ok(false)
     }
 
     pub fn get_cache_usage(&self) -> f64 {
-        todo!()
+        self.engine.get_engine_usage()
     }
 
     pub fn remove_cached_item(
