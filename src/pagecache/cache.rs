@@ -66,7 +66,7 @@ impl Cache {
     pub fn create_item(&mut self, cid: String) -> Result<()> {
         let inner = self
             .inner
-            .read()
+            .write()
             .map_err(|e| anyhow!("Failed to acquire read lock: {:?}", e))?;
 
         let mut contents = inner
@@ -81,7 +81,7 @@ impl Cache {
     pub fn delete_item(&mut self, cid: String) -> Result<()> {
         let inner = self
             .inner
-            .read()
+            .write()
             .map_err(|e| anyhow!("Failed to acquire read lock: {:?}", e))?;
 
         let mut contents = inner
@@ -114,7 +114,7 @@ impl Cache {
     ) -> Result<bool> {
         let inner = self
             .inner
-            .read()
+            .write()
             .map_err(|e| anyhow!("Failed to acquire read lock: {:?}", e))?;
 
         self.update_content_metadata_locked(&inner, cid, metadata, values_to_update)
@@ -122,7 +122,7 @@ impl Cache {
 
     fn update_content_metadata_locked(
         &self,
-        inner: &RwLockReadGuard<CacheInner>,
+        inner: &RwLockWriteGuard<CacheInner>,
         cid: String,
         metadata: Metadata,
         values_to_update: Vec<String>,
@@ -369,7 +369,7 @@ impl Cache {
     ) -> Result<()> {
         let inner = self
             .inner
-            .read()
+            .write()
             .map_err(|e| anyhow!("Failed to acquire read lock: {:?}", e))?;
         let mut file_inode_mapping = inner
             .file_inode_mapping
