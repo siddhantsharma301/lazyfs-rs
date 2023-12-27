@@ -18,7 +18,9 @@ pub struct Page {
 impl Page {
     fn new(config: Box<Config>) -> Result<Self> {
         if config.cache_page_size % config.io_block_size != 0 {
-            return Err(anyhow!("Cache page size must be divisible by IO block size"));
+            return Err(anyhow!(
+                "Cache page size must be divisible by IO block size"
+            ));
         }
 
         let cache_page_size = config.cache_page_size;
@@ -70,11 +72,24 @@ impl Page {
     pub fn update_block_data(
         &mut self,
         block_id: i32,
-        new_data: &[u8],
-        data_length: usize,
+        new_data: &Vec<u8>,
         off_start: usize,
     ) -> Result<bool> {
-        todo!()
+        let block_offsets = self.get_block_offsets(block_id);
+        let off_min = block_offsets.0;
+        if block_offsets.0 >= 0 && block_offsets.1 > 0 {
+            if new_data.len() > self.config.io_block_size {
+                return Err(anyhow!("Data length must be less than IO block size"));
+            }
+            self.rewrite_offset_data(
+                new_data,
+                off_min as usize + off_start,
+                off_min as usize + off_start + new_data.len() - 1,
+            );
+        } else {
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     fn rewrite_offset_data(&mut self, new_data: &[u8], start: usize, end: usize) {

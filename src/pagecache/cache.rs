@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock, MutexGuard};
+use std::sync::{Mutex, MutexGuard, RwLock};
 
 use crate::pagecache::config::Config;
 use crate::pagecache::engine::{AllocateOperationType, PageCacheEngine};
@@ -37,7 +37,12 @@ impl Cache {
     //     todo!()
     // }
 
-    fn get_readable_offsets(&self, cid: String, item: &MutexGuard<Item>, block_id: i32) -> Option<(i32, i32)> {
+    fn get_readable_offsets(
+        &self,
+        cid: String,
+        item: &MutexGuard<Item>,
+        block_id: i32,
+    ) -> Option<(i32, i32)> {
         let data = &item.data;
         let page_id = data.get_page_id(block_id);
         if self.engine.is_block_cached(cid, page_id, block_id) {
@@ -112,7 +117,7 @@ impl Cache {
     pub fn put_data_blocks(
         &mut self,
         cid: String,
-        blocks: HashMap<i32, (&[u8], usize, i32, i32)>,
+        blocks: HashMap<i32, (&Vec<u8>, i32, i32)>,
         operation_type: AllocateOperationType,
     ) -> Result<HashMap<i32, bool>> {
         let is_new = self
@@ -127,13 +132,13 @@ impl Cache {
         let lock = self.contents.read().unwrap();
         let mut item = lock.get(&cid.clone()).unwrap().lock().unwrap();
         let mut put_mapping = HashMap::new();
-        for (block_id, (block_data, size, start, _)) in blocks.clone() {
+        for (block_id, (block_data, start, _)) in blocks.clone() {
             let page_id = if is_new {
                 -1
             } else {
                 item.data.get_page_id(block_id)
             };
-            put_mapping.insert(block_id, (page_id, block_data, size, start));
+            put_mapping.insert(block_id, (page_id, block_data, start));
         }
 
         let allocations = self
@@ -143,7 +148,7 @@ impl Cache {
         let mut allocated_at_least_one_page = false;
         for (block_id, page_id) in allocations {
             let offsets = blocks[&block_id];
-            let (_, _, _, readable_to) = offsets;
+            let (_, _, readable_to) = offsets;
             if page_id >= 0 {
                 allocated_at_least_one_page = true;
                 let max_offset = item
@@ -228,8 +233,27 @@ impl Cache {
         owner: String,
         path: PathBuf,
         is_from_cache: bool,
-    ) -> Result<()> {
-        todo!()
+    ) -> Result<bool> {
+        if !self.has_content_cached(owner.clone())? {
+            return Ok(false);
+        }
+        let mut lock = self.contents.write().unwrap();
+        let mut item = lock.get(&owner.clone()).unwrap().lock().unwrap();
+        self.file_inode_mapping.write().unwrap().remove(&path);
+
+        let before_nlinks = item.metadata.nlinks;
+        let mut after_meta = item.metadata.clone();
+        after_meta.nlinks = std::cmp::max(before_nlinks as u32 - 1, 1);
+        item.update_metadata(after_meta, vec!["nlinks".to_string()]);
+        if !is_from_cache && before_nlinks > 1 {
+            return Ok(false);
+        }
+
+        self.engine.remove_cached_blocks(owner.clone());
+        drop(item);
+        lock.remove(&owner);
+
+        Ok(true)
     }
 
     pub fn sync_owner(
@@ -245,8 +269,25 @@ impl Cache {
         todo!()
     }
 
-    pub fn clear_cache(&mut self) {
-        todo!()
+    pub fn clear_cache(&mut self) -> Result<()>{
+        let lock = self.file_inode_mapping.read().unwrap();
+        let items: Vec<_> = lock.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        // todo: unsure if can drop lock here
+        drop(lock);
+        for (key, value) in &items {
+            self.remove_cached_item(value.to_string(), key.to_path_buf(), true)?;
+        }
+
+        let mut lock = self.contents.write().unwrap();
+        let items: Vec<_> = lock.keys().cloned().collect();
+        for item in items {
+            let item_lock = lock.get(&item).unwrap().lock();
+            self.engine.remove_cached_blocks(item.clone());
+            drop(item_lock);
+            lock.remove(&item);
+        }
+        
+        Ok(())
     }
 
     pub fn truncate_item(&mut self, owner: String, new_size: usize) -> Result<()> {

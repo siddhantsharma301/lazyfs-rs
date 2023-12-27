@@ -239,12 +239,12 @@ impl PageCacheEngine for CustomCacheEngine {
     fn allocate_blocks(
         &mut self,
         content_owner_id: String,
-        block_data_mapping: HashMap<i32, (i32, &[u8], usize, i32)>,
+        block_data_mapping: HashMap<i32, (i32, &Vec<u8>, i32)>,
         operation_type: AllocateOperationType,
     ) -> Result<HashMap<i32, i32>> {
         let mut res_block_allocated_pages = HashMap::new();
 
-        for (&blk_id, &(page_id, ref blk_data, blk_data_len, offset_start)) in &block_data_mapping {
+        for (&blk_id, &(page_id, ref blk_data, offset_start)) in &block_data_mapping {
             if page_id >= 0 {
                 if let Some(mut page) = self.get_page_ptr(page_id) {
                     if page.is_page_owner(&content_owner_id.clone()) && page.contains_block(blk_id)
@@ -252,7 +252,6 @@ impl PageCacheEngine for CustomCacheEngine {
                         page.update_block_data(
                             blk_id,
                             blk_data,
-                            blk_data_len,
                             offset_start as usize,
                         )?;
                         res_block_allocated_pages.insert(blk_id, page_id);
@@ -269,7 +268,7 @@ impl PageCacheEngine for CustomCacheEngine {
             if free_page_id >= 0 {
                 if let Some(mut page) = free_page_ptr {
                     let offs = page.get_allocate_free_offset(blk_id)?;
-                    page.update_block_data(blk_id, blk_data, blk_data_len, offset_start as usize)?;
+                    page.update_block_data(blk_id, blk_data, offset_start as usize)?;
 
                     if operation_type == AllocateOperationType::OpWrite {
                         page.set_page_as_dirty(true);
