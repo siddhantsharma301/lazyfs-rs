@@ -105,6 +105,10 @@ impl ItemData {
     pub fn remove_block(&mut self, block_id: i32) {
         self.blocks.remove(&block_id);
     }
+
+    pub fn has_block(&self, block_id: i32) -> bool {
+        self.blocks.contains_key(&block_id)
+    }
 }
 
 impl Default for ItemData {
