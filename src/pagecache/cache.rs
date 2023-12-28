@@ -2,8 +2,7 @@ use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::fs::{FileTimes, OpenOptions};
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::SystemTime;
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 
 use crate::pagecache::config::Config;
 use crate::pagecache::engine::{AllocateOperationType, PageCacheEngine};
@@ -43,13 +42,6 @@ impl Cache {
             inner: RwLock::new(CacheInner::new(engine)),
         }
     }
-
-    // fn get_content_ptr(&self, cid: String) -> Option<&Mutex<Item>> {
-    //     // let lock = self.contents.read().unwrap();
-    //     // let mutex = lock.get(&cid);
-    //     // mutex
-    //     todo!()
-    // }
 
     fn get_readable_offsets(
         &self,

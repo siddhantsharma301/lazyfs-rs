@@ -90,7 +90,7 @@ impl ItemData {
         &mut self,
         block_id: i32,
         allocated_page: i32,
-        readable_from: i32,
+        _readable_from: i32,
         readable_to: i32,
     ) -> i32 {
         let block = self
