@@ -377,7 +377,7 @@ impl PageCacheEngine for CustomCacheEngine {
         true
     }
 
-    fn sync_pages(&mut self, owner: String, size: u64, orig_path: String) -> Result<()> {
+    fn sync_pages(&mut self, owner: String, size: u32, orig_path: String) -> Result<()> {
         let mut lock = self.data.write().unwrap();
 
         let mut fd = OpenOptions::new().write(true).open(orig_path)?;
@@ -460,7 +460,7 @@ impl PageCacheEngine for CustomCacheEngine {
         }
 
         // Truncate the file to the specified size
-        fd.set_len(size)?;
+        fd.set_len(size as u64)?;
 
         Ok(())
     }

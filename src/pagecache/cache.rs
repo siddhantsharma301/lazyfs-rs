@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
+use std::fs::{FileTimes, OpenOptions};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::SystemTime;
 
 use crate::pagecache::config::Config;
 use crate::pagecache::engine::{AllocateOperationType, PageCacheEngine};
@@ -73,7 +75,7 @@ impl Cache {
         Ok(None)
     }
 
-    pub fn insert_item(&mut self, cid: String) -> Result<()> {
+    pub fn insert_item(&self, cid: String) -> Result<()> {
         let inner = self
             .inner
             .write()
@@ -88,7 +90,7 @@ impl Cache {
         Ok(())
     }
 
-    pub fn insert_item_if_not_exists(&mut self, cid: String) -> Result<bool> {
+    pub fn insert_item_if_not_exists(&self, cid: String) -> Result<bool> {
         let inner = self
             .inner
             .write()
@@ -104,7 +106,7 @@ impl Cache {
         Ok(is_new)
     }
 
-    pub fn remove_item(&mut self, cid: String) -> Result<()> {
+    pub fn remove_item(&self, cid: String) -> Result<()> {
         let inner = self
             .inner
             .write()
@@ -133,7 +135,7 @@ impl Cache {
         Ok(contents.contains_key(&cid))
     }
     pub fn update_content_metadata(
-        &mut self,
+        &self,
         cid: String,
         metadata: Metadata,
         values_to_update: Vec<String>,
@@ -143,10 +145,10 @@ impl Cache {
             .write()
             .map_err(|e| anyhow!("Failed to acquire read lock: {:?}", e))?;
 
-        self.update_content_metadata_locked(&inner, cid, metadata, values_to_update)
+        self.update_content_metadata_inner(&inner, cid, metadata, values_to_update)
     }
 
-    fn update_content_metadata_locked(
+    fn update_content_metadata_inner(
         &self,
         inner: &RwLockWriteGuard<CacheInner>,
         cid: String,
@@ -348,7 +350,7 @@ impl Cache {
     }
 
     pub fn remove_cached_item(
-        &mut self,
+        &self,
         owner: String,
         path: PathBuf,
         is_from_cache: bool,
@@ -405,18 +407,139 @@ impl Cache {
         Ok(true)
     }
 
-    //     pub fn sync_owner(
-    //         &mut self,
-    //         owner: String,
-    //         only_sync_data: bool,
-    //         orig_path: PathBuf,
-    //     ) -> Result<()> {
-    //         todo!()
-    //     }
+    pub fn sync_owner(
+        &self,
+        owner: String,
+        only_sync_data: bool,
+        orig_path: PathBuf,
+    ) -> Result<()> {
+        let inner = self
+            .inner
+            .write()
+            .map_err(|e| anyhow!("Failed to acquire write lock on inner: {:?}", e))?;
 
-    //     pub fn rename_item(&mut self, old_cid: String, new_cid: String) -> Result<()> {
-    //         todo!()
-    //     }
+        if !self.has_content_cached(owner.clone())? {
+            return Err(anyhow!("Content not cached"));
+        }
+
+        self.sync_owner_inner(&inner, owner, only_sync_data, orig_path)
+    }
+
+    fn sync_owner_inner(
+        &self,
+        inner: &RwLockWriteGuard<CacheInner>,
+        owner: String,
+        only_sync_data: bool,
+        orig_path: PathBuf,
+    ) -> Result<()> {
+        let contents = inner
+            .contents
+            .read()
+            .map_err(|e| anyhow!("Failed to read contents: {:?}", e))?;
+        let item = contents
+            .get(&owner)
+            .ok_or_else(|| anyhow!("Item not found"))?
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock item: {:?}", e))?;
+        let last_size = item.metadata.size;
+
+        let mut engine = inner
+            .engine
+            .write()
+            .map_err(|e| anyhow!("Failed to read engine: {:?}", e))?;
+        engine.sync_pages(
+            owner.clone(),
+            last_size,
+            orig_path.to_string_lossy().to_string(),
+        )?;
+
+        let mut contents = inner
+            .contents
+            .write()
+            .map_err(|e| anyhow!("Failed to read contents: {:?}", e))?;
+        let mut item = contents
+            .get_mut(&owner)
+            .ok_or_else(|| anyhow!("Item not found"))?
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock item: {:?}", e))?;
+        item.is_synced = true;
+
+        if !only_sync_data {
+            let meta = &item.metadata;
+            let file_times = FileTimes::new();
+            file_times.set_accessed(meta.atim);
+            file_times.set_modified(meta.mtim);
+            let fd = OpenOptions::new().write(true).open(orig_path)?;
+            fd.set_times(file_times)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn rename_item(&mut self, old_cid: PathBuf, new_cid: PathBuf) -> Result<bool> {
+        let inner = self
+            .inner
+            .write()
+            .map_err(|e| anyhow!("Failed to acquire write lock on 'inner': {:?}", e))?;
+
+        if let Some(inode) = inner
+            .file_inode_mapping
+            .write()
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to acquire write lock on 'file_inode_mapping': {:?}",
+                    e
+                )
+            })?
+            .get(&old_cid)
+            .cloned()
+        {
+            let mut file_inode_mapping = inner.file_inode_mapping.write().map_err(|e| {
+                anyhow!(
+                    "Failed to acquire write lock on 'file_inode_mapping': {:?}",
+                    e
+                )
+            })?;
+
+            let to_remove_inode = file_inode_mapping
+                .remove(&new_cid)
+                .unwrap_or_else(|| "".to_string());
+            file_inode_mapping.insert(new_cid, inode.clone());
+
+            if let Some(item_mutex) = inner
+                .contents
+                .write()
+                .map_err(|e| anyhow!("Failed to acquire write lock on content': {:?}", e))?
+                .get(&to_remove_inode)
+            {
+                let mut item = item_mutex
+                    .lock()
+                    .map_err(|e| anyhow!("Failed to lock item: {:?}", e))?;
+
+                let mut metadata = item.metadata.clone();
+                let before_nlinks = metadata.nlinks;
+                let new_nlinks = std::cmp::max(before_nlinks - 1, 1);
+                metadata.nlinks = new_nlinks;
+                item.update_metadata(metadata, vec!["nlinks".to_string()]);
+
+                if before_nlinks <= 1 {
+                    inner
+                        .engine
+                        .write()
+                        .map_err(|e| anyhow!("Failed to acquire write lock on engine: {:?}", e))?
+                        .remove_cached_blocks(to_remove_inode.clone());
+
+                    inner
+                        .contents
+                        .write()
+                        .map_err(|e| anyhow!("Failed to acquire write lock on content': {:?}", e))?
+                        .remove(&to_remove_inode);
+                }
+            }
+        }
+
+        Ok(true)
+    }
 
     pub fn clear_cache(&mut self) -> Result<()> {
         let inner = self
@@ -448,7 +571,7 @@ impl Cache {
             engine.remove_cached_blocks(item.clone());
             contents.remove(&item);
         }
-        
+
         Ok(())
     }
 
@@ -456,13 +579,56 @@ impl Cache {
     //         todo!()
     //     }
 
-    //     pub fn full_checkpoint(&mut self) {
-    //         todo!()
-    //     }
+    pub fn full_checkpoint(&self) -> Result<()> {
+        let inner = self
+            .inner
+            .write()
+            .map_err(|e| anyhow!("Failed to acquire write lock on inner: {:?}", e))?;
+        let file_inode_mapping = inner.file_inode_mapping.read().map_err(|e| {
+            anyhow!(
+                "Failed to acquire write lock on file inode mapping: {:?}",
+                e
+            )
+        })?;
 
-    //     pub fn report_unsynced_data(&self) -> Vec<(String, usize, Vec<(i32, (i32, i32), i32)>)> {
-    //         todo!()
-    //     }
+        for (path, owner) in file_inode_mapping.iter() {
+            self.sync_owner_inner(&inner, owner.clone(), false, path.clone())?;
+        }
+        Ok(())
+    }
+
+    pub fn report_unsynced_data(
+        &self,
+    ) -> Result<Vec<(String, usize, Vec<(i32, (i32, i32), i32)>)>> {
+        let inner = self
+            .inner
+            .read()
+            .map_err(|e| anyhow!("Failed to acquire read lock: {:?}", e))?;
+        let contents = inner
+            .contents
+            .read()
+            .map_err(|e| anyhow!("Failed to acquire read lock on contents: {:?}", e))?;
+        let engine = inner
+            .engine
+            .read()
+            .map_err(|e| anyhow!("Failed to acquire read lock on engine: {:?}", e))?;
+
+        let mut unsynced = Vec::new();
+        for (owner, item) in contents.iter() {
+            let item = item
+                .lock()
+                .map_err(|e| anyhow!("Failed to acquire read lock on item: {:?}", e))?;
+            if !item.is_synced {
+                unsynced.push((
+                    owner.clone(),
+                    0usize,
+                    engine.get_dirty_blocks_info(owner.to_string()),
+                ));
+            }
+        }
+
+        Ok(unsynced)
+    }
 
     pub fn get_original_inode(&self, path: PathBuf) -> Result<Option<String>> {
         let inner = self
@@ -497,7 +663,7 @@ impl Cache {
             match metadata {
                 Some(mut metadata) => {
                     metadata.nlinks += 1;
-                    self.update_content_metadata_locked(
+                    self.update_content_metadata_inner(
                         &inner,
                         inode,
                         metadata,
@@ -511,7 +677,19 @@ impl Cache {
         Ok(())
     }
 
-    //     pub fn find_files_mapped_to_inode(&self, inode: String) -> Vec<String> {
-    //         todo!()
-    //     }
+    pub fn find_files_mapped_to_inode(&self, inode: String) -> Result<Vec<PathBuf>> {
+        let inner = self
+            .inner
+            .read()
+            .map_err(|e| anyhow!("Failed to acquire read lock: {:?}", e))?;
+        let file_inode_mapping = inner
+            .file_inode_mapping
+            .read()
+            .map_err(|e| anyhow!("Failed to acquire read lock on file inode mapping: {:?}", e))?;
+        Ok(file_inode_mapping
+            .iter()
+            .filter(|(_key, val)| **val == inode)
+            .map(|(key, _val)| key.clone())
+            .collect::<Vec<_>>())
+    }
 }

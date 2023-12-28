@@ -45,7 +45,7 @@ pub trait PageCacheEngine {
 
     fn remove_cached_blocks(&mut self, content_owner_id: String) -> bool;
 
-    fn sync_pages(&mut self, owner: String, size: u64, orig_path: String) -> Result<()>;
+    fn sync_pages(&mut self, owner: String, size: u32, orig_path: String) -> Result<()>;
 
     fn rename_owner_pages(&mut self, old_owner: String, new_owner: String) -> bool;
 
