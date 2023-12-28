@@ -106,8 +106,16 @@ impl ItemData {
         self.blocks.remove(&block_id);
     }
 
+    pub fn remove_all(&mut self) {
+        self.blocks.clear();
+    }
+
     pub fn has_block(&self, block_id: i32) -> bool {
         self.blocks.contains_key(&block_id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.blocks.len()
     }
 }
 

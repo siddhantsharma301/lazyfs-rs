@@ -195,7 +195,7 @@ impl Cache {
     }
 
     pub fn put_data_blocks(
-        &mut self,
+        &self,
         cid: String,
         blocks: HashMap<i32, (&Vec<u8>, i32, i32)>,
         operation_type: AllocateOperationType,
@@ -256,7 +256,7 @@ impl Cache {
     }
 
     pub fn get_data_blocks(
-        &mut self,
+        &self,
         cid: String,
         blocks: HashMap<i32, &[u8]>,
     ) -> Result<HashMap<i32, (bool, Option<(i32, i32)>)>> {
@@ -476,7 +476,7 @@ impl Cache {
         Ok(())
     }
 
-    pub fn rename_item(&mut self, old_cid: PathBuf, new_cid: PathBuf) -> Result<bool> {
+    pub fn rename_item(&self, old_cid: PathBuf, new_cid: PathBuf) -> Result<bool> {
         let inner = self
             .inner
             .write()
@@ -541,7 +541,7 @@ impl Cache {
         Ok(true)
     }
 
-    pub fn clear_cache(&mut self) -> Result<()> {
+    pub fn clear_cache(&self) -> Result<()> {
         let inner = self
             .inner
             .write()
@@ -575,9 +575,43 @@ impl Cache {
         Ok(())
     }
 
-    //     pub fn truncate_item(&mut self, owner: String, new_size: usize) -> Result<()> {
-    //         todo!()
-    //     }
+    pub fn truncate_item(&self, owner: String, new_size: usize) -> Result<()> {
+        if !self.has_content_cached(owner.clone())? {
+            return Ok(());
+        }
+
+        let inner = self
+            .inner
+            .write()
+            .map_err(|e| anyhow!("Failed to acquire read lock: {:?}", e))?;
+        let contents = inner
+            .contents
+            .read()
+            .map_err(|e| anyhow!("Failed to acquire read lock on contents: {:?}", e))?;
+        let mut engine = inner
+            .engine
+            .write()
+            .map_err(|e| anyhow!("Failed to acquire read lock on engine: {:?}", e))?;
+        let mut item = contents
+            .get(&owner)
+            .ok_or_else(|| anyhow!("Item not found"))?
+            .lock()
+            .map_err(|e| anyhow!("Failed to acquire read lock on item: {:?}", e))?;
+
+        if new_size == 0 {
+            if item.data.len() > 0 {
+                engine.remove_cached_blocks(owner.clone());
+                item.data.remove_all();
+            }
+        }
+        let truncate_from = new_size / self.config.io_block_size;
+        let truncate_to = new_size % self.config.io_block_size;
+        let truncated = item.data.truncate_blocks_after(truncate_from as i32, truncate_to as i32);
+        engine.truncate_cached_blocks(owner, truncated, truncate_from as i32, truncate_to as i32);
+        item.is_synced = false;
+
+        Ok(())
+    }
 
     pub fn full_checkpoint(&self) -> Result<()> {
         let inner = self
@@ -642,12 +676,7 @@ impl Cache {
         Ok(file_inode_mapping.get(&path).cloned())
     }
 
-    pub fn insert_inode_mapping(
-        &mut self,
-        path: PathBuf,
-        inode: String,
-        increase: bool,
-    ) -> Result<()> {
+    pub fn insert_inode_mapping(&self, path: PathBuf, inode: String, increase: bool) -> Result<()> {
         let inner = self
             .inner
             .write()
