@@ -60,7 +60,7 @@ impl Cache {
             .engine
             .read()
             .map_err(|e| anyhow!("Failed to acquire read lock on engine: {:?}", e))?;
-        if engine.is_block_cached(cid, page_id, block_id) {
+        if engine.is_block_cached(cid, page_id, block_id)? {
             return Ok(data.get_readable_offsets(block_id));
         }
 
@@ -323,7 +323,7 @@ impl Cache {
                 .engine
                 .read()
                 .map_err(|e| anyhow!("Failed to acquire read lock on engine: {:?}", e))?;
-            return Ok(engine.is_block_cached(cid, page_id, block_id));
+            return Ok(engine.is_block_cached(cid, page_id, block_id)?);
         }
 
         Ok(false)
@@ -338,7 +338,7 @@ impl Cache {
             .engine
             .read()
             .map_err(|e| anyhow!("Failed to acquire read lock on engine: {:?}", e))?;
-        Ok(engine.get_engine_usage())
+        Ok(engine.get_engine_usage()?)
     }
 
     pub fn remove_cached_item(
@@ -679,7 +679,7 @@ impl Cache {
                 unsynced.push((
                     owner.clone(),
                     0usize,
-                    engine.get_dirty_blocks_info(owner.to_string()),
+                    engine.get_dirty_blocks_info(owner.to_string())?,
                 ));
             }
         }
