@@ -1,17 +1,16 @@
 use crate::pagecache::config::Config;
 use crate::pagecache::engine::page::Page;
 use crate::pagecache::engine::{AllocateOperationType, PageCacheEngine};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::{Cursor, Seek, SeekFrom, Write};
-use std::sync::{Mutex, RwLock};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[derive(Debug)]
 pub struct CustomCacheEngine {
     config: Box<Config>,
     data: RwLock<CustomCacheEngineInner>,
-    lru: Mutex<CustomCacheLRU>,
 }
 
 #[derive(Debug)]
@@ -21,6 +20,9 @@ pub(crate) struct CustomCacheEngineInner {
     owner_pages_mapping: HashMap<String, HashSet<i32>>,
     owner_ordered_pages_mapping: HashMap<String, HashMap<i32, (i32, Box<Page>, (i32, i32), bool)>>,
     owner_free_pages_mapping: HashMap<String, Vec<i32>>,
+
+    lru_main_vector: VecDeque<i32>,
+    page_order_mapping: HashMap<i32, i32>,
 }
 
 impl CustomCacheEngineInner {
@@ -31,19 +33,7 @@ impl CustomCacheEngineInner {
             owner_pages_mapping: HashMap::new(),
             owner_ordered_pages_mapping: HashMap::new(),
             owner_free_pages_mapping: HashMap::new(),
-        }
-    }
-}
 
-#[derive(Debug)]
-struct CustomCacheLRU {
-    lru_main_vector: VecDeque<i32>,
-    page_order_mapping: HashMap<i32, i32>,
-}
-
-impl CustomCacheLRU {
-    pub fn new() -> Self {
-        CustomCacheLRU {
             lru_main_vector: VecDeque::new(),
             page_order_mapping: HashMap::new(),
         }
@@ -55,30 +45,35 @@ impl CustomCacheEngine {
         CustomCacheEngine {
             config,
             data: RwLock::new(CustomCacheEngineInner::new()),
-            lru: Mutex::new(CustomCacheLRU::new()),
         }
     }
 
-    fn get_page_ptr(&self, page_id: i32) -> Option<Box<Page>> {
-        self.data
-            .read()
-            .unwrap()
-            .search_index
-            .get(&page_id)
-            .cloned()
+    fn get_page_ptr_read(
+        &self,
+        data: &RwLockReadGuard<CustomCacheEngineInner>,
+        page_id: i32,
+    ) -> Option<Box<Page>> {
+        data.search_index.get(&page_id).cloned()
     }
 
-    fn has_empty_pages(&self) -> bool {
-        self.data.read().unwrap().free_pages.len() > 0
+    fn get_page_ptr_write(
+        &self,
+        data: &RwLockWriteGuard<CustomCacheEngineInner>,
+        page_id: i32,
+    ) -> Option<Box<Page>> {
+        data.search_index.get(&page_id).cloned()
     }
 
-    fn get_next_free_page(&mut self, owner_id: String) -> Result<(i32, Option<Box<Page>>)> {
+    fn get_next_free_page(
+        &self,
+        lock: &mut RwLockWriteGuard<CustomCacheEngineInner>,
+        owner_id: String,
+    ) -> Result<(i32, Option<Box<Page>>)> {
         // Check if this owner has space left in their pages
-        let mut lock = self.data.write().unwrap();
         if let Some(free_pages) = lock.owner_free_pages_mapping.get_mut(&owner_id) {
             if let Some(&free_page) = free_pages.last() {
                 free_pages.pop();
-                let page = self.get_page_ptr(free_page);
+                let page = self.get_page_ptr_write(&lock, free_page);
                 return Ok((free_page, page));
             }
         }
@@ -86,20 +81,18 @@ impl CustomCacheEngine {
         // Otherwise, get an empty page
         if let Some(&last_index) = lock.free_pages.last() {
             lock.free_pages.pop();
-            let page = self.get_page_ptr(last_index);
+            let page = self.get_page_ptr_write(&lock, last_index);
             return Ok((last_index, page));
         }
 
         // No empty pages, then
         if self.config.apply_lru_eviction {
-            let lru_lock = self.lru.lock().unwrap();
-            let replace_place_id = match lru_lock.lru_main_vector.back() {
+            let replace_place_id = match lock.lru_main_vector.back() {
                 Some(r) => *r,
                 None => return Ok((-1, None)),
             };
-            drop(lru_lock);
 
-            let mut page_to_reset = match self.get_page_ptr(replace_place_id) {
+            let mut page_to_reset = match self.get_page_ptr_write(&lock, replace_place_id) {
                 Some(p) => p,
                 None => return Ok((-1, None)),
             };
@@ -127,54 +120,58 @@ impl CustomCacheEngine {
         Ok((-1, None))
     }
 
-    fn apply_lru_after_page_visitation_on_write(&mut self, visited_page_id: i32) {
-        let mut lru_lock = self.lru.lock().unwrap();
-        if let Some(&position) = lru_lock.page_order_mapping.get(&visited_page_id) {
-            lru_lock.lru_main_vector.remove(position as usize);
+    fn apply_lru_after_page_visitation_on_write(
+        &self,
+        lock: &mut RwLockWriteGuard<CustomCacheEngineInner>,
+        visited_page_id: i32,
+    ) -> Result<()> {
+        if let Some(&position) = lock.page_order_mapping.get(&visited_page_id) {
+            lock.lru_main_vector.remove(position as usize);
         }
 
-        lru_lock.lru_main_vector.push_front(visited_page_id);
-        let front_position = *lru_lock.lru_main_vector.front().unwrap();
-        lru_lock
-            .page_order_mapping
+        lock.lru_main_vector.push_front(visited_page_id);
+        let front_position = *lock.lru_main_vector.front().unwrap();
+        lock.page_order_mapping
             .insert(visited_page_id, front_position);
 
         // If the LRU list is larger than the cache size, remove the least recently used page
-        if lru_lock.page_order_mapping.len() > self.config.cache_nr_pages as usize {
-            if let Some(&back_page_id) = lru_lock.lru_main_vector.back() {
-                lru_lock.page_order_mapping.remove(&back_page_id);
-                lru_lock.lru_main_vector.pop_back();
+        if lock.page_order_mapping.len() > self.config.cache_nr_pages as usize {
+            if let Some(&back_page_id) = lock.lru_main_vector.back() {
+                lock.page_order_mapping.remove(&back_page_id);
+                lock.lru_main_vector.pop_back();
             }
         }
+        Ok(())
     }
 
-    fn apply_lru_after_page_visitation_on_read(&mut self, visited_page_id: i32) {
-        let mut lru_lock = self.lru.lock().unwrap();
-        if let Some(&position) = lru_lock.page_order_mapping.get(&visited_page_id) {
-            lru_lock.lru_main_vector.remove(position as usize);
+    fn apply_lru_after_page_visitation_on_read(
+        &self,
+        lock: &mut RwLockWriteGuard<CustomCacheEngineInner>,
+        visited_page_id: i32,
+    ) {
+        if let Some(&position) = lock.page_order_mapping.get(&visited_page_id) {
+            lock.lru_main_vector.remove(position as usize);
         }
 
         // Add the visited page to the front of the LRU list
-        lru_lock.lru_main_vector.push_front(visited_page_id);
-        let new_position = *lru_lock.lru_main_vector.front().unwrap();
-        lru_lock
-            .page_order_mapping
+        lock.lru_main_vector.push_front(visited_page_id);
+        let new_position = *lock.lru_main_vector.front().unwrap();
+        lock.page_order_mapping
             .insert(visited_page_id, new_position);
     }
 
     fn update_owner_pages(
-        &mut self,
+        &self,
+        lock: &mut RwLockWriteGuard<CustomCacheEngineInner>,
         new_owner: String,
         page_id: i32,
         block_id: i32,
         block_offsets_inside_page: (i32, i32),
-    ) {
-        let mut page = match self.get_page_ptr(page_id) {
+    ) -> Result<()> {
+        let mut page = match self.get_page_ptr_write(&lock, page_id) {
             Some(p) => p,
-            None => return,
+            None => return Ok(()),
         };
-
-        let mut lock = self.data.write().unwrap();
 
         let real_owner = page.get_page_owner();
         if real_owner == "none" || real_owner != new_owner {
@@ -232,31 +229,40 @@ impl CustomCacheEngine {
                 .or_insert_with(Vec::new)
                 .push(page_id);
         }
+
+        Ok(())
     }
 }
 
 impl PageCacheEngine for CustomCacheEngine {
     fn allocate_blocks(
-        &mut self,
+        &self,
         content_owner_id: String,
         block_data_mapping: HashMap<i32, (i32, &Vec<u8>, i32)>,
         operation_type: AllocateOperationType,
     ) -> Result<HashMap<i32, i32>> {
+        let mut lock = self
+            .data
+            .write()
+            .map_err(|e| anyhow!("Failed to acquire write lock on data: {:?}", e))?;
+
         let mut res_block_allocated_pages = HashMap::new();
 
         for (&blk_id, &(page_id, ref blk_data, offset_start)) in &block_data_mapping {
             if page_id >= 0 {
-                if let Some(mut page) = self.get_page_ptr(page_id) {
+                if let Some(mut page) = self.get_page_ptr_write(&lock, page_id) {
                     if page.is_page_owner(&content_owner_id.clone()) && page.contains_block(blk_id)
                     {
-                        page.update_block_data(
-                            blk_id,
-                            blk_data,
-                            offset_start as usize,
-                        )?;
+                        page.update_block_data(blk_id, blk_data, offset_start as usize)?;
                         res_block_allocated_pages.insert(blk_id, page_id);
 
-                        self.update_owner_pages(content_owner_id.clone(), page_id, blk_id, (0, 0));
+                        self.update_owner_pages(
+                            &mut lock,
+                            content_owner_id.clone(),
+                            page_id,
+                            blk_id,
+                            (0, 0),
+                        )?;
 
                         continue;
                     }
@@ -264,7 +270,7 @@ impl PageCacheEngine for CustomCacheEngine {
             }
 
             let (free_page_id, free_page_ptr) =
-                self.get_next_free_page(content_owner_id.clone())?;
+                self.get_next_free_page(&mut lock, content_owner_id.clone())?;
             if free_page_id >= 0 {
                 if let Some(mut page) = free_page_ptr {
                     let offs = page.get_allocate_free_offset(blk_id)?;
@@ -275,9 +281,15 @@ impl PageCacheEngine for CustomCacheEngine {
                     }
 
                     res_block_allocated_pages.insert(blk_id, free_page_id);
-                    self.apply_lru_after_page_visitation_on_write(free_page_id);
+                    self.apply_lru_after_page_visitation_on_write(&mut lock, free_page_id)?;
 
-                    self.update_owner_pages(content_owner_id.clone(), free_page_id, blk_id, offs);
+                    self.update_owner_pages(
+                        &mut lock,
+                        content_owner_id.clone(),
+                        free_page_id,
+                        blk_id,
+                        offs,
+                    )?;
                 } else {
                     res_block_allocated_pages.insert(blk_id, -1);
                 }
@@ -290,20 +302,25 @@ impl PageCacheEngine for CustomCacheEngine {
     }
 
     fn get_blocks(
-        &mut self,
+        &self,
         content_owner_id: String,
         block_pages: HashMap<i32, (i32, Vec<u8>, i32)>,
     ) -> Result<HashMap<i32, bool>> {
+        let mut lock = self
+            .data
+            .write()
+            .map_err(|e| anyhow!("Failed to acquire write lock on data: {:?}", e))?;
+
         let mut res_block_data = HashMap::new();
 
         for (blk_id, (page_id, ref mut data, read_to_max_index)) in block_pages {
-            if let Some(page) = self.get_page_ptr(page_id) {
+            if let Some(page) = self.get_page_ptr_write(&lock, page_id) {
                 if page.is_page_owner(&content_owner_id) && page.contains_block(blk_id) {
                     page.get_block_data(blk_id, data.as_mut_slice(), read_to_max_index as usize)?;
                     res_block_data.insert(blk_id, true);
 
                     if self.config.apply_lru_eviction {
-                        self.apply_lru_after_page_visitation_on_read(page_id);
+                        self.apply_lru_after_page_visitation_on_read(&mut lock, page_id);
                     }
                 } else {
                     res_block_data.insert(blk_id, false);
@@ -316,38 +333,58 @@ impl PageCacheEngine for CustomCacheEngine {
         Ok(res_block_data)
     }
 
-    fn is_block_cached(&self, content_owner_id: String, page_id: i32, block_id: i32) -> bool {
-        if let Some(page) = self.get_page_ptr(page_id) {
-            return page.is_page_owner(&content_owner_id) && page.contains_block(block_id);
+    fn is_block_cached(
+        &self,
+        content_owner_id: String,
+        page_id: i32,
+        block_id: i32,
+    ) -> Result<bool> {
+        let lock = self
+            .data
+            .read()
+            .map_err(|e| anyhow!("Failed to acquire read lock on data: {:?}", e))?;
+        if let Some(page) = self.get_page_ptr_read(&lock, page_id) {
+            return Ok(page.is_page_owner(&content_owner_id) && page.contains_block(block_id));
         }
-        false
+        Ok(false)
     }
 
     fn make_block_readable_to_offset(
-        &mut self,
+        &self,
         cid: String,
         page_id: i32,
         block_id: i32,
         offset: i32,
-    ) {
-        let _lock = self.data.write().unwrap();
-        let mut page = match self.get_page_ptr(page_id) {
+    ) -> Result<()> {
+        let mut lock = self
+            .data
+            .write()
+            .map_err(|e| anyhow!("Failed to acquire write lock on data: {:?}", e))?;
+        let mut page = match self.get_page_ptr_write(&mut lock, page_id) {
             Some(p) => p,
-            None => return,
+            None => return Ok(()),
         };
         if page.is_page_owner(&cid) {
             page.make_block_readable_to(block_id, offset);
         }
+
+        Ok(())
     }
 
-    fn get_engine_usage(&self) -> f64 {
-        let lock = self.data.read().unwrap();
+    fn get_engine_usage(&self) -> Result<f64> {
+        let lock = self
+            .data
+            .read()
+            .map_err(|e| anyhow!("Failed to acquire read lock on data: {:?}", e))?;
         let used_pages = self.config.cache_nr_pages - lock.free_pages.len();
-        (used_pages as f64 / self.config.cache_nr_pages as f64) * 100.0
+        Ok((used_pages as f64 / self.config.cache_nr_pages as f64) * 100.0)
     }
 
-    fn remove_cached_blocks(&mut self, owner: String) -> bool {
-        let mut lock = self.data.write().unwrap();
+    fn remove_cached_blocks(&self, owner: String) -> Result<bool> {
+        let mut lock = self
+            .data
+            .write()
+            .map_err(|e| anyhow!("Failed to acquire write lock on data: {:?}", e))?;
 
         lock.owner_free_pages_mapping.remove(&owner);
 
@@ -359,14 +396,13 @@ impl PageCacheEngine for CustomCacheEngine {
 
                 // Apply LRU eviction logic if enabled
                 if self.config.apply_lru_eviction {
-                    let mut lru_lock = self.lru.lock().unwrap();
-                    if let Some(position) = lru_lock.page_order_mapping.remove(&page_id) {
-                        lru_lock.lru_main_vector.remove(position as usize);
+                    if let Some(position) = lock.page_order_mapping.remove(&page_id) {
+                        lock.lru_main_vector.remove(position as usize);
                     }
                 }
 
                 // Reset the page and change its owner to "none"
-                if let Some(mut page_ptr) = self.get_page_ptr(page_id) {
+                if let Some(mut page_ptr) = self.get_page_ptr_write(&mut lock, page_id) {
                     page_ptr.reset();
                     page_ptr.change_owner("none".to_string());
                 }
@@ -374,11 +410,14 @@ impl PageCacheEngine for CustomCacheEngine {
             lock.owner_ordered_pages_mapping.remove(&owner);
         }
 
-        true
+        Ok(true)
     }
 
-    fn sync_pages(&mut self, owner: String, size: u32, orig_path: String) -> Result<()> {
-        let mut lock = self.data.write().unwrap();
+    fn sync_pages(&self, owner: String, size: u32, orig_path: String) -> Result<()> {
+        let mut lock = self
+            .data
+            .write()
+            .map_err(|e| anyhow!("Failed to acquire write lock on data: {:?}", e))?;
 
         let mut fd = OpenOptions::new().write(true).open(orig_path)?;
 
@@ -465,12 +504,15 @@ impl PageCacheEngine for CustomCacheEngine {
         Ok(())
     }
 
-    fn rename_owner_pages(&mut self, old_owner: String, new_owner: String) -> bool {
-        let mut lock = self.data.write().unwrap();
+    fn rename_owner_pages(&self, old_owner: String, new_owner: String) -> Result<bool> {
+        let mut lock = self
+            .data
+            .write()
+            .map_err(|e| anyhow!("Failed to acquire write lock on data: {:?}", e))?;
 
         // Check if the old owner exists in the mapping
         if !lock.owner_pages_mapping.contains_key(&old_owner) {
-            return false;
+            return Ok(false);
         }
 
         // Retrieve the old owner's data
@@ -480,7 +522,7 @@ impl PageCacheEngine for CustomCacheEngine {
 
         // Change the owner of each page
         for &page_id in &old_page_mapping {
-            if let Some(mut page) = self.get_page_ptr(page_id) {
+            if let Some(mut page) = self.get_page_ptr_write(&mut lock, page_id) {
                 page.change_owner(new_owner.clone());
             }
         }
@@ -493,20 +535,23 @@ impl PageCacheEngine for CustomCacheEngine {
         lock.owner_ordered_pages_mapping
             .insert(new_owner, old_ordered_pages);
 
-        true
+        Ok(true)
     }
 
     fn truncate_cached_blocks(
-        &mut self,
+        &self,
         content_owner_id: String,
         blocks_to_remove: HashMap<i32, i32>,
         from_block_id: i32,
         index_inside_block: i32,
-    ) -> bool {
-        let mut lock = self.data.write().unwrap();
+    ) -> Result<bool> {
+        let mut lock = self
+            .data
+            .write()
+            .map_err(|e| anyhow!("Failed to acquire write lock on data: {:?}", e))?;
 
         for (&blk_id, &page_id) in &blocks_to_remove {
-            if let Some(mut page) = self.get_page_ptr(page_id) {
+            if let Some(mut page) = self.get_page_ptr_write(&mut lock, page_id) {
                 if page.is_page_owner(&content_owner_id) {
                     if blk_id == from_block_id && index_inside_block > 0 {
                         if page.contains_block(from_block_id) {
@@ -530,10 +575,8 @@ impl PageCacheEngine for CustomCacheEngine {
                         if !page.is_page_dirty() {
                             lock.free_pages.push(page_id);
                             if self.config.apply_lru_eviction {
-                                let mut lru_lock = self.lru.lock().unwrap();
-                                if let Some(position) = lru_lock.page_order_mapping.remove(&page_id)
-                                {
-                                    lru_lock.lru_main_vector.remove(position as usize);
+                                if let Some(position) = lock.page_order_mapping.remove(&page_id) {
+                                    lock.lru_main_vector.remove(position as usize);
                                 }
                             }
                             page.reset();
@@ -544,11 +587,14 @@ impl PageCacheEngine for CustomCacheEngine {
             }
         }
 
-        true
+        Ok(true)
     }
 
-    fn get_dirty_blocks_info(&self, owner: String) -> Vec<(i32, (i32, i32), i32)> {
-        let lock = self.data.read().unwrap();
+    fn get_dirty_blocks_info(&self, owner: String) -> Result<Vec<(i32, (i32, i32), i32)>> {
+        let lock = self
+            .data
+            .read()
+            .map_err(|e| anyhow!("Failed to acquire read lock on data: {:?}", e))?;
         let mut res = Vec::new();
         if let Some(ordered_pages) = lock.owner_ordered_pages_mapping.get(&owner) {
             for (&block_id, &(page_id, ref page, _, is_synced)) in ordered_pages {
@@ -558,6 +604,6 @@ impl PageCacheEngine for CustomCacheEngine {
                 }
             }
         }
-        res
+        Ok(res)
     }
 }

@@ -14,14 +14,14 @@ pub enum AllocateOperationType {
 
 pub trait PageCacheEngine {
     fn allocate_blocks(
-        &mut self,
+        &self,
         content_owner_id: String,
         block_data_mapping: HashMap<i32, (i32, &Vec<u8>, i32)>,
         operation_type: AllocateOperationType,
     ) -> Result<HashMap<i32, i32>>;
 
     fn get_blocks(
-        &mut self,
+        &self,
         content_owner_id: String,
         block_pages: HashMap<i32, (i32, Vec<u8>, i32)>,
     ) -> Result<HashMap<i32, bool>>;
@@ -31,31 +31,31 @@ pub trait PageCacheEngine {
         content_owner_id: String,
         page_id: i32,
         block_id: i32,
-    ) -> bool;
+    ) -> Result<bool>;
 
     fn make_block_readable_to_offset(
-        &mut self,
+        &self,
         cid: String,
         page_id: i32,
         block_id: i32,
         offset: i32,
-    );
+    ) -> Result<()>;
 
-    fn get_engine_usage(&self) -> f64;
+    fn get_engine_usage(&self) -> Result<f64>;
 
-    fn remove_cached_blocks(&mut self, content_owner_id: String) -> bool;
+    fn remove_cached_blocks(&self, content_owner_id: String) -> Result<bool>;
 
-    fn sync_pages(&mut self, owner: String, size: u32, orig_path: String) -> Result<()>;
+    fn sync_pages(&self, owner: String, size: u32, orig_path: String) -> Result<()>;
 
-    fn rename_owner_pages(&mut self, old_owner: String, new_owner: String) -> bool;
+    fn rename_owner_pages(&self, old_owner: String, new_owner: String) -> Result<bool>;
 
     fn truncate_cached_blocks(
-        &mut self,
+        &self,
         content_owner_id: String,
         blocks_to_remove: HashMap<i32, i32>,
         from_block_id: i32,
         index_inside_block: i32,
-    ) -> bool;
+    ) -> Result<bool>;
 
-    fn get_dirty_blocks_info(&self, owner: String) -> Vec<(i32, (i32, i32), i32)>;
+    fn get_dirty_blocks_info(&self, owner: String) -> Result<Vec<(i32, (i32, i32), i32)>>;
 }
