@@ -472,63 +472,92 @@ impl Cache {
         let inner = self
             .inner
             .write()
-            .map_err(|e| anyhow!("Failed to acquire write lock on 'inner': {:?}", e))?;
+            .map_err(|e| anyhow!("Failed to acquire write lock: {:?}", e))?;
 
-        if let Some(inode) = inner
+        let file_inode_mapping = inner
+            .file_inode_mapping
+            .read()
+            .map_err(|e| anyhow!("Failed to acquire read lock on file inode mapping: {:?}", e))?;
+
+        let inode = file_inode_mapping.get(&old_cid).cloned();
+        drop(file_inode_mapping);
+
+        let mut file_inode_mapping = inner
             .file_inode_mapping
             .write()
-            .map_err(|e| {
-                anyhow!(
-                    "Failed to acquire write lock on 'file_inode_mapping': {:?}",
-                    e
-                )
-            })?
-            .get(&old_cid)
-            .cloned()
-        {
-            let mut file_inode_mapping = inner.file_inode_mapping.write().map_err(|e| {
-                anyhow!(
-                    "Failed to acquire write lock on 'file_inode_mapping': {:?}",
-                    e
-                )
-            })?;
+            .map_err(|e| anyhow!("Failed to acquire read lock on file inode mapping: {:?}", e))?;
+        // let mut contents = inner.contents;
 
-            let to_remove_inode = file_inode_mapping
-                .remove(&new_cid)
-                .unwrap_or_else(|| "".to_string());
-            file_inode_mapping.insert(new_cid, inode.clone());
+        match inode {
+            Some(inode) => {
+                file_inode_mapping.remove(&old_cid);
+                let to_remove_inode = file_inode_mapping
+                    .remove(&new_cid)
+                    .unwrap_or_else(|| "".to_string());
+                file_inode_mapping.insert(new_cid, inode.clone());
 
-            if let Some(item_mutex) = inner
-                .contents
-                .write()
-                .map_err(|e| anyhow!("Failed to acquire write lock on content': {:?}", e))?
-                .get(&to_remove_inode)
-            {
-                let mut item = item_mutex
-                    .lock()
-                    .map_err(|e| anyhow!("Failed to lock item: {:?}", e))?;
-
-                let mut metadata = item.metadata.clone();
-                let before_nlinks = metadata.nlinks;
-                let new_nlinks = std::cmp::max(before_nlinks - 1, 1);
-                metadata.nlinks = new_nlinks;
-                item.update_metadata(metadata, vec!["nlinks".to_string()]);
-
-                if before_nlinks <= 1 {
-                    inner
-                        .engine
-                        .write()
-                        .map_err(|e| anyhow!("Failed to acquire write lock on engine: {:?}", e))?
-                        .remove_cached_blocks(to_remove_inode.clone());
-
-                    inner
-                        .contents
-                        .write()
-                        .map_err(|e| anyhow!("Failed to acquire write lock on content': {:?}", e))?
-                        .remove(&to_remove_inode);
+                if self.has_content_cached(to_remove_inode)? {
+                    
                 }
             }
+            None => {}
         }
+
+        // if let Some(inode) = inner
+        //     .file_inode_mapping
+        //     .write()
+        //     .map_err(|e| {
+        //         anyhow!(
+        //             "Failed to acquire write lock on 'file_inode_mapping': {:?}",
+        //             e
+        //         )
+        //     })?
+        //     .get(&old_cid)
+        //     .cloned()
+        // {
+        //     let mut file_inode_mapping = inner.file_inode_mapping.write().map_err(|e| {
+        //         anyhow!(
+        //             "Failed to acquire write lock on 'file_inode_mapping': {:?}",
+        //             e
+        //         )
+        //     })?;
+
+        //     let to_remove_inode = file_inode_mapping
+        //         .remove(&new_cid)
+        //         .unwrap_or_else(|| "".to_string());
+        //     file_inode_mapping.insert(new_cid, inode.clone());
+
+        //     if let Some(item_mutex) = inner
+        //         .contents
+        //         .write()
+        //         .map_err(|e| anyhow!("Failed to acquire write lock on content': {:?}", e))?
+        //         .get(&to_remove_inode)
+        //     {
+        //         let mut item = item_mutex
+        //             .lock()
+        //             .map_err(|e| anyhow!("Failed to lock item: {:?}", e))?;
+
+        //         let mut metadata = item.metadata.clone();
+        //         let before_nlinks = metadata.nlinks;
+        //         let new_nlinks = std::cmp::max(before_nlinks - 1, 1);
+        //         metadata.nlinks = new_nlinks;
+        //         item.update_metadata(metadata, vec!["nlinks".to_string()]);
+
+        //         if before_nlinks <= 1 {
+        //             inner
+        //                 .engine
+        //                 .write()
+        //                 .map_err(|e| anyhow!("Failed to acquire write lock on engine: {:?}", e))?
+        //                 .remove_cached_blocks(to_remove_inode.clone());
+
+        //             inner
+        //                 .contents
+        //                 .write()
+        //                 .map_err(|e| anyhow!("Failed to acquire write lock on content': {:?}", e))?
+        //                 .remove(&to_remove_inode);
+        //         }
+        //     }
+        // }
 
         Ok(true)
     }
@@ -598,7 +627,9 @@ impl Cache {
         }
         let truncate_from = new_size / self.config.io_block_size;
         let truncate_to = new_size % self.config.io_block_size;
-        let truncated = item.data.truncate_blocks_after(truncate_from as i32, truncate_to as i32);
+        let truncated = item
+            .data
+            .truncate_blocks_after(truncate_from as i32, truncate_to as i32);
         engine.truncate_cached_blocks(owner, truncated, truncate_from as i32, truncate_to as i32);
         item.is_synced = false;
 
