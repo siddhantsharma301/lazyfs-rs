@@ -11,23 +11,35 @@ use crate::pagecache::item::Item;
 
 pub struct Cache {
     /// Cache configuration struct
-    config: Config,
+    config: Box<Config>,
+    inner: RwLock<CacheInner>,
+}
+
+struct CacheInner {
     /// Maps filenames to the corresponding inodes. If a hard link is created for a file, a new
     /// entry on this map is also created, for the same inode.
-    file_inode_mapping: HashMap<PathBuf, String>,
+    file_inode_mapping: RwLock<HashMap<PathBuf, String>>,
     /// Maps content ids (e.g. file names) to the contents
-    contents: HashMap<String, Item>,
+    contents: RwLock<HashMap<String, Mutex<Item>>>,
     /// Cache engine abstraction struct
-    engine: Box<dyn PageCacheEngine>,
+    engine: RwLock<Box<dyn PageCacheEngine>>,
+}
+
+impl CacheInner {
+    fn new(engine: impl PageCacheEngine + 'static) -> Self {
+        Self {
+            contents: RwLock::new(HashMap::new()),
+            file_inode_mapping: RwLock::new(HashMap::new()),
+            engine: RwLock::new(Box::new(engine)),
+        }
+    }
 }
 
 impl Cache {
     pub fn new(config: Config, engine: impl PageCacheEngine + 'static) -> Self {
         Cache {
-            config,
-            file_inode_mapping: HashMap::new(),
-            contents: HashMap::new(),
-            engine: Box::new(engine)
+            config: Box::new(config),
+            inner: RwLock::new(CacheInner::new(engine)),
         }
     }
 
