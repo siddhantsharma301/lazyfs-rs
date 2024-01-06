@@ -1,6 +1,8 @@
 pub mod pagecache;
 pub mod lazyfs;
 
+const TRACING_TARGET: &str = "lazyfs-rs";
+
 pub fn add(left: usize, right: usize) -> usize {
     left + right
 }

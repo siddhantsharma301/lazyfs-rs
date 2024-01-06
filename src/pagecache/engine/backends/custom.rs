@@ -1,11 +1,14 @@
 use crate::pagecache::config::Config;
 use crate::pagecache::engine::page::Page;
 use crate::pagecache::engine::{AllocateOperationType, PageCacheEngine};
+use crate::pagecache::{BlockId, Offsets, PageId};
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+pub type PageSynced = bool;
 
 #[derive(Debug)]
 pub struct CustomCacheEngine {
@@ -18,7 +21,8 @@ pub(crate) struct CustomCacheEngineInner {
     search_index: HashMap<i32, Box<Page>>,
     free_pages: Vec<i32>,
     owner_pages_mapping: HashMap<String, HashSet<i32>>,
-    owner_ordered_pages_mapping: HashMap<String, HashMap<i32, (i32, Box<Page>, (i32, i32), bool)>>,
+    owner_ordered_pages_mapping:
+        HashMap<String, HashMap<BlockId, (PageId, Box<Page>, Offsets, PageSynced)>>,
     owner_free_pages_mapping: HashMap<String, Vec<i32>>,
 
     lru_main_vector: VecDeque<i32>,
@@ -51,7 +55,7 @@ impl CustomCacheEngine {
     fn get_page_ptr_read(
         &self,
         data: &RwLockReadGuard<CustomCacheEngineInner>,
-        page_id: i32,
+        page_id: PageId,
     ) -> Option<Box<Page>> {
         data.search_index.get(&page_id).cloned()
     }
@@ -59,7 +63,7 @@ impl CustomCacheEngine {
     fn get_page_ptr_write(
         &self,
         data: &RwLockWriteGuard<CustomCacheEngineInner>,
-        page_id: i32,
+        page_id: PageId,
     ) -> Option<Box<Page>> {
         data.search_index.get(&page_id).cloned()
     }
@@ -68,7 +72,7 @@ impl CustomCacheEngine {
         &self,
         lock: &mut RwLockWriteGuard<CustomCacheEngineInner>,
         owner_id: String,
-    ) -> Result<(i32, Option<Box<Page>>)> {
+    ) -> Result<(PageId, Option<Box<Page>>)> {
         // Check if this owner has space left in their pages
         if let Some(free_pages) = lock.owner_free_pages_mapping.get_mut(&owner_id) {
             if let Some(&free_page) = free_pages.last() {
@@ -123,7 +127,7 @@ impl CustomCacheEngine {
     fn apply_lru_after_page_visitation_on_write(
         &self,
         lock: &mut RwLockWriteGuard<CustomCacheEngineInner>,
-        visited_page_id: i32,
+        visited_page_id: PageId,
     ) -> Result<()> {
         if let Some(&position) = lock.page_order_mapping.get(&visited_page_id) {
             lock.lru_main_vector.remove(position as usize);
@@ -147,7 +151,7 @@ impl CustomCacheEngine {
     fn apply_lru_after_page_visitation_on_read(
         &self,
         lock: &mut RwLockWriteGuard<CustomCacheEngineInner>,
-        visited_page_id: i32,
+        visited_page_id: PageId,
     ) {
         if let Some(&position) = lock.page_order_mapping.get(&visited_page_id) {
             lock.lru_main_vector.remove(position as usize);
@@ -164,9 +168,9 @@ impl CustomCacheEngine {
         &self,
         lock: &mut RwLockWriteGuard<CustomCacheEngineInner>,
         new_owner: String,
-        page_id: i32,
-        block_id: i32,
-        block_offsets_inside_page: (i32, i32),
+        page_id: PageId,
+        block_id: BlockId,
+        block_offsets_inside_page: Offsets,
     ) -> Result<()> {
         let mut page = match self.get_page_ptr_write(&lock, page_id) {
             Some(p) => p,
@@ -238,9 +242,9 @@ impl PageCacheEngine for CustomCacheEngine {
     fn allocate_blocks(
         &self,
         content_owner_id: String,
-        block_data_mapping: HashMap<i32, (i32, &Vec<u8>, i32)>,
+        block_data_mapping: HashMap<BlockId, (PageId, &Vec<u8>, i32)>,
         operation_type: AllocateOperationType,
-    ) -> Result<HashMap<i32, i32>> {
+    ) -> Result<HashMap<BlockId, PageId>> {
         let mut lock = self
             .data
             .write()
@@ -248,19 +252,19 @@ impl PageCacheEngine for CustomCacheEngine {
 
         let mut res_block_allocated_pages = HashMap::new();
 
-        for (&blk_id, &(page_id, ref blk_data, offset_start)) in &block_data_mapping {
+        for (&block_id, &(page_id, ref blk_data, offset_start)) in &block_data_mapping {
             if page_id >= 0 {
                 if let Some(mut page) = self.get_page_ptr_write(&lock, page_id) {
-                    if page.is_page_owner(&content_owner_id.clone()) && page.contains_block(blk_id)
+                    if page.is_page_owner(&content_owner_id.clone()) && page.contains_block(block_id)
                     {
-                        page.update_block_data(blk_id, blk_data, offset_start as usize)?;
-                        res_block_allocated_pages.insert(blk_id, page_id);
+                        page.update_block_data(block_id, blk_data, offset_start as usize)?;
+                        res_block_allocated_pages.insert(block_id, page_id);
 
                         self.update_owner_pages(
                             &mut lock,
                             content_owner_id.clone(),
                             page_id,
-                            blk_id,
+                            block_id,
                             (0, 0),
                         )?;
 
@@ -273,28 +277,28 @@ impl PageCacheEngine for CustomCacheEngine {
                 self.get_next_free_page(&mut lock, content_owner_id.clone())?;
             if free_page_id >= 0 {
                 if let Some(mut page) = free_page_ptr {
-                    let offs = page.get_allocate_free_offset(blk_id)?;
-                    page.update_block_data(blk_id, blk_data, offset_start as usize)?;
+                    let offs = page.get_allocate_free_offset(block_id)?;
+                    page.update_block_data(block_id, blk_data, offset_start as usize)?;
 
                     if operation_type == AllocateOperationType::OpWrite {
                         page.set_page_as_dirty(true);
                     }
 
-                    res_block_allocated_pages.insert(blk_id, free_page_id);
+                    res_block_allocated_pages.insert(block_id, free_page_id);
                     self.apply_lru_after_page_visitation_on_write(&mut lock, free_page_id)?;
 
                     self.update_owner_pages(
                         &mut lock,
                         content_owner_id.clone(),
                         free_page_id,
-                        blk_id,
+                        block_id,
                         offs,
                     )?;
                 } else {
-                    res_block_allocated_pages.insert(blk_id, -1);
+                    res_block_allocated_pages.insert(block_id, -1);
                 }
             } else {
-                res_block_allocated_pages.insert(blk_id, -1);
+                res_block_allocated_pages.insert(block_id, -1);
             }
         }
 
@@ -304,8 +308,8 @@ impl PageCacheEngine for CustomCacheEngine {
     fn get_blocks(
         &self,
         content_owner_id: String,
-        block_pages: HashMap<i32, (i32, Vec<u8>, i32)>,
-    ) -> Result<HashMap<i32, bool>> {
+        block_pages: HashMap<BlockId, (PageId, Vec<u8>, i32)>,
+    ) -> Result<HashMap<BlockId, bool>> {
         let mut lock = self
             .data
             .write()
@@ -313,20 +317,20 @@ impl PageCacheEngine for CustomCacheEngine {
 
         let mut res_block_data = HashMap::new();
 
-        for (blk_id, (page_id, ref mut data, read_to_max_index)) in block_pages {
+        for (block_id, (page_id, ref mut data, read_to_max_index)) in block_pages {
             if let Some(page) = self.get_page_ptr_write(&lock, page_id) {
-                if page.is_page_owner(&content_owner_id) && page.contains_block(blk_id) {
-                    page.get_block_data(blk_id, data.as_mut_slice(), read_to_max_index as usize)?;
-                    res_block_data.insert(blk_id, true);
+                if page.is_page_owner(&content_owner_id) && page.contains_block(block_id) {
+                    page.get_block_data(block_id, data.as_mut_slice(), read_to_max_index as usize)?;
+                    res_block_data.insert(block_id, true);
 
                     if self.config.apply_lru_eviction {
                         self.apply_lru_after_page_visitation_on_read(&mut lock, page_id);
                     }
                 } else {
-                    res_block_data.insert(blk_id, false);
+                    res_block_data.insert(block_id, false);
                 }
             } else {
-                res_block_data.insert(blk_id, false);
+                res_block_data.insert(block_id, false);
             }
         }
 
@@ -336,8 +340,8 @@ impl PageCacheEngine for CustomCacheEngine {
     fn is_block_cached(
         &self,
         content_owner_id: String,
-        page_id: i32,
-        block_id: i32,
+        page_id: PageId,
+        block_id: BlockId,
     ) -> Result<bool> {
         let lock = self
             .data
@@ -352,8 +356,8 @@ impl PageCacheEngine for CustomCacheEngine {
     fn make_block_readable_to_offset(
         &self,
         cid: String,
-        page_id: i32,
-        block_id: i32,
+        page_id: PageId,
+        block_id: BlockId,
         offset: i32,
     ) -> Result<()> {
         let mut lock = self
@@ -425,8 +429,7 @@ impl PageCacheEngine for CustomCacheEngine {
             // let mut wrote_bytes = 0;
             let mut page_streak = 0;
 
-            let mut new_iterate_blocks: HashMap<i32, (i32, Page, (i32, i32), bool)> =
-                HashMap::new();
+            let mut new_iterate_blocks: HashMap<i32, (i32, Page, Offsets, bool)> = HashMap::new();
 
             for (index, (_, (page_id, page, offsets, flag))) in
                 iterate_blocks.iter_mut().enumerate()
@@ -441,7 +444,7 @@ impl PageCacheEngine for CustomCacheEngine {
             let mut page_streak_last_offset =
                 new_iterate_blocks.keys().next().unwrap() * (self.config.io_block_size as i32);
 
-            let mut page_chunk: Vec<(i32, Page, (i32, i32), bool)> =
+            let mut page_chunk: Vec<(i32, Page, Offsets, bool)> =
                 Vec::with_capacity(new_iterate_blocks.len());
             page_chunk.extend(new_iterate_blocks.values().cloned());
 
@@ -541,8 +544,8 @@ impl PageCacheEngine for CustomCacheEngine {
     fn truncate_cached_blocks(
         &self,
         content_owner_id: String,
-        blocks_to_remove: HashMap<i32, i32>,
-        from_block_id: i32,
+        blocks_to_remove: HashMap<BlockId, PageId>,
+        from_block_id: BlockId,
         index_inside_block: i32,
     ) -> Result<bool> {
         let mut lock = self
@@ -550,16 +553,16 @@ impl PageCacheEngine for CustomCacheEngine {
             .write()
             .map_err(|e| anyhow!("Failed to acquire write lock on data: {:?}", e))?;
 
-        for (&blk_id, &page_id) in &blocks_to_remove {
+        for (&block_id, &page_id) in &blocks_to_remove {
             if let Some(mut page) = self.get_page_ptr_write(&mut lock, page_id) {
                 if page.is_page_owner(&content_owner_id) {
-                    if blk_id == from_block_id && index_inside_block > 0 {
+                    if block_id == from_block_id && index_inside_block > 0 {
                         if page.contains_block(from_block_id) {
                             page.make_block_readable_to(from_block_id, index_inside_block - 1);
                             page.write_null_from(from_block_id, index_inside_block);
                         }
                     } else {
-                        page.remove_block(blk_id);
+                        page.remove_block(block_id);
 
                         if let Some(owner_pages) =
                             lock.owner_pages_mapping.get_mut(&content_owner_id)
@@ -569,7 +572,7 @@ impl PageCacheEngine for CustomCacheEngine {
                         if let Some(ordered_pages) =
                             lock.owner_ordered_pages_mapping.get_mut(&content_owner_id)
                         {
-                            ordered_pages.remove(&blk_id);
+                            ordered_pages.remove(&block_id);
                         }
 
                         if !page.is_page_dirty() {
@@ -590,7 +593,7 @@ impl PageCacheEngine for CustomCacheEngine {
         Ok(true)
     }
 
-    fn get_dirty_blocks_info(&self, owner: String) -> Result<Vec<(i32, (i32, i32), i32)>> {
+    fn get_dirty_blocks_info(&self, owner: String) -> Result<Vec<(BlockId, Offsets, PageId)>> {
         let lock = self
             .data
             .read()

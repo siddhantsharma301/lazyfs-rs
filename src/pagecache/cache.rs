@@ -8,6 +8,7 @@ use crate::pagecache::config::Config;
 use crate::pagecache::engine::{AllocateOperationType, PageCacheEngine};
 use crate::pagecache::item::metadata::Metadata;
 use crate::pagecache::item::Item;
+use crate::pagecache::Offsets;
 
 pub struct Cache {
     /// Cache configuration struct
@@ -48,7 +49,7 @@ impl Cache {
         cid: String,
         item: &MutexGuard<Item>,
         block_id: i32,
-    ) -> Result<Option<(i32, i32)>> {
+    ) -> Result<Option<Offsets>> {
         let data = &item.data;
         let page_id = data.get_page_id(block_id);
 
@@ -251,7 +252,7 @@ impl Cache {
         &self,
         cid: String,
         blocks: HashMap<i32, &[u8]>,
-    ) -> Result<HashMap<i32, (bool, Option<(i32, i32)>)>> {
+    ) -> Result<HashMap<i32, (bool, Option<Offsets>)>> {
         if !self.has_content_cached(cid.clone())? {
             return Ok(HashMap::new());
         }
@@ -362,7 +363,7 @@ impl Cache {
             .engine
             .write()
             .map_err(|e| anyhow!("Failed to acquire read lock on engine: {:?}", e))?;
-        engine.remove_cached_blocks(owner);
+        engine.remove_cached_blocks(owner)?;
 
         Ok(true)
     }
@@ -486,7 +487,6 @@ impl Cache {
             .file_inode_mapping
             .write()
             .map_err(|e| anyhow!("Failed to acquire read lock on file inode mapping: {:?}", e))?;
-        // let mut contents = inner.contents;
 
         match inode {
             Some(inode) => {
@@ -502,62 +502,6 @@ impl Cache {
             }
             None => {}
         }
-
-        // if let Some(inode) = inner
-        //     .file_inode_mapping
-        //     .write()
-        //     .map_err(|e| {
-        //         anyhow!(
-        //             "Failed to acquire write lock on 'file_inode_mapping': {:?}",
-        //             e
-        //         )
-        //     })?
-        //     .get(&old_cid)
-        //     .cloned()
-        // {
-        //     let mut file_inode_mapping = inner.file_inode_mapping.write().map_err(|e| {
-        //         anyhow!(
-        //             "Failed to acquire write lock on 'file_inode_mapping': {:?}",
-        //             e
-        //         )
-        //     })?;
-
-        //     let to_remove_inode = file_inode_mapping
-        //         .remove(&new_cid)
-        //         .unwrap_or_else(|| "".to_string());
-        //     file_inode_mapping.insert(new_cid, inode.clone());
-
-        //     if let Some(item_mutex) = inner
-        //         .contents
-        //         .write()
-        //         .map_err(|e| anyhow!("Failed to acquire write lock on content': {:?}", e))?
-        //         .get(&to_remove_inode)
-        //     {
-        //         let mut item = item_mutex
-        //             .lock()
-        //             .map_err(|e| anyhow!("Failed to lock item: {:?}", e))?;
-
-        //         let mut metadata = item.metadata.clone();
-        //         let before_nlinks = metadata.nlinks;
-        //         let new_nlinks = std::cmp::max(before_nlinks - 1, 1);
-        //         metadata.nlinks = new_nlinks;
-        //         item.update_metadata(metadata, vec!["nlinks".to_string()]);
-
-        //         if before_nlinks <= 1 {
-        //             inner
-        //                 .engine
-        //                 .write()
-        //                 .map_err(|e| anyhow!("Failed to acquire write lock on engine: {:?}", e))?
-        //                 .remove_cached_blocks(to_remove_inode.clone());
-
-        //             inner
-        //                 .contents
-        //                 .write()
-        //                 .map_err(|e| anyhow!("Failed to acquire write lock on content': {:?}", e))?
-        //                 .remove(&to_remove_inode);
-        //         }
-        //     }
-        // }
 
         Ok(true)
     }
@@ -621,7 +565,7 @@ impl Cache {
 
         if new_size == 0 {
             if item.data.len() > 0 {
-                engine.remove_cached_blocks(owner.clone());
+                engine.remove_cached_blocks(owner.clone())?;
                 item.data.remove_all();
             }
         }
@@ -630,7 +574,7 @@ impl Cache {
         let truncated = item
             .data
             .truncate_blocks_after(truncate_from as i32, truncate_to as i32);
-        engine.truncate_cached_blocks(owner, truncated, truncate_from as i32, truncate_to as i32);
+        engine.truncate_cached_blocks(owner, truncated, truncate_from as i32, truncate_to as i32)?;
         item.is_synced = false;
 
         Ok(())

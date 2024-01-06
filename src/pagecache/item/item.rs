@@ -1,5 +1,6 @@
 use crate::pagecache::item::block_info::BlockInfo;
 use crate::pagecache::item::metadata::Metadata;
+use crate::pagecache::{BlockId, PageId, Offsets};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
@@ -38,18 +39,18 @@ impl Default for Item {
 
 #[derive(Clone, Debug)]
 pub struct ItemData {
-    blocks: HashMap<i32, Box<BlockInfo>>,
+    blocks: HashMap<BlockId, Box<BlockInfo>>,
 }
 
 impl ItemData {
-    pub fn get_page_id(&self, blk_id: i32) -> i32 {
-        match self.blocks.get(&blk_id) {
+    pub fn get_page_id(&self, block_id: BlockId) -> PageId {
+        match self.blocks.get(&block_id) {
             Some(block_info) => block_info.page_index_number,
             None => -1,
         }
     }
 
-    pub fn get_readable_offsets(&self, block_id: i32) -> Option<(i32, i32)> {
+    pub fn get_readable_offsets(&self, block_id: i32) -> Option<Offsets> {
         match self.blocks.get(&block_id) {
             Some(block_info) => Some(block_info.readable_offset),
             None => None,
@@ -63,17 +64,17 @@ impl ItemData {
             .collect()
     }
 
-    pub fn truncate_blocks_after(&mut self, blk_id: i32, blk_byte_index: i32) -> HashMap<i32, i32> {
+    pub fn truncate_blocks_after(&mut self, block_id: BlockId, blk_byte_index: i32) -> HashMap<i32, i32> {
         let mut res = HashMap::new();
         let mut ids_to_remove = Vec::new();
 
         for (&id, block_info) in self.blocks.iter_mut() {
-            if id >= blk_id {
+            if id >= block_id {
                 res.insert(id, block_info.page_index_number);
 
-                if id > blk_id || blk_byte_index == 0 {
+                if id > block_id || blk_byte_index == 0 {
                     ids_to_remove.push(id);
-                } else if id == blk_id {
+                } else if id == block_id {
                     block_info.truncate_readable_to(blk_byte_index - 1);
                 }
             }
@@ -88,8 +89,8 @@ impl ItemData {
 
     pub fn set_block_page_id(
         &mut self,
-        block_id: i32,
-        allocated_page: i32,
+        block_id: BlockId,
+        allocated_page: PageId,
         _readable_from: i32,
         readable_to: i32,
     ) -> i32 {
@@ -102,7 +103,7 @@ impl ItemData {
         block.make_readable_to(readable_to)
     }
 
-    pub fn remove_block(&mut self, block_id: i32) {
+    pub fn remove_block(&mut self, block_id: BlockId) {
         self.blocks.remove(&block_id);
     }
 
@@ -110,7 +111,7 @@ impl ItemData {
         self.blocks.clear();
     }
 
-    pub fn has_block(&self, block_id: i32) -> bool {
+    pub fn has_block(&self, block_id: BlockId) -> bool {
         self.blocks.contains_key(&block_id)
     }
 

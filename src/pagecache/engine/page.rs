@@ -1,5 +1,6 @@
 use crate::pagecache::config::Config;
 use crate::pagecache::engine::block_offsets::BlockOffsets;
+use crate::pagecache::{BlockId, Offsets};
 use anyhow::{anyhow, Result};
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -71,7 +72,7 @@ impl Page {
 
     pub fn update_block_data(
         &mut self,
-        block_id: i32,
+        block_id: BlockId,
         new_data: &Vec<u8>,
         off_start: usize,
     ) -> Result<bool> {
@@ -99,7 +100,7 @@ impl Page {
         }
     }
 
-    pub fn get_allocate_free_offset(&mut self, block_id: i32) -> Result<(i32, i32)> {
+    pub fn get_allocate_free_offset(&mut self, block_id: BlockId) -> Result<Offsets> {
         if let Some(&free_index) = self.free_block_indexes.last() {
             self.free_block_indexes.pop();
 
@@ -118,7 +119,7 @@ impl Page {
 
     pub fn get_block_data(
         &self,
-        block_id: i32,
+        block_id: BlockId,
         buffer: &mut [u8],
         read_to_max_index: usize,
     ) -> Result<()> {
@@ -177,12 +178,12 @@ impl Page {
         self.is_dirty = dirty;
     }
 
-    pub fn make_block_readable_to(&mut self, blk_id: i32, max_offset: i32) {
+    pub fn make_block_readable_to(&mut self, block_id: BlockId, max_offset: i32) {
         self.allocated_block_ids
-            .make_readable_to(blk_id, max_offset);
+            .make_readable_to(block_id, max_offset);
     }
 
-    pub fn write_null_from(&mut self, block_id: i32, from_offset: i32) {
+    pub fn write_null_from(&mut self, block_id: BlockId, from_offset: i32) {
         let (off_first, _) = self.get_block_offsets(block_id);
         let range = off_first + (from_offset as i32)..(self.config.io_block_size as i32);
         for i in range {
@@ -190,7 +191,7 @@ impl Page {
         }
     }
 
-    pub fn remove_block(&mut self, block_id: i32) {
+    pub fn remove_block(&mut self, block_id: BlockId) {
         if self.contains_block(block_id) {
             let (off_first, _) = self.get_block_offsets(block_id);
             self.free_block_indexes.push(off_first as i32);
@@ -205,11 +206,11 @@ impl Page {
         }
     }
 
-    fn get_block_offsets(&self, block_id: i32) -> (i32, i32) {
+    fn get_block_offsets(&self, block_id: BlockId) -> Offsets {
         self.allocated_block_ids.get_block_offsets(block_id)
     }
 
-    pub fn contains_block(&self, block_id: i32) -> bool {
+    pub fn contains_block(&self, block_id: BlockId) -> bool {
         self.allocated_block_ids.contains_block(block_id)
     }
 }
